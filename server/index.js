@@ -335,7 +335,7 @@ app.get('/api/scheduler', (_request, response) => {
   response.json(schedulerState);
 });
 
-app.get('*', (request, response, next) => {
+app.use((request, response, next) => {
   if (request.path.startsWith('/api/')) {
     next();
     return;
