@@ -1,0 +1,1067 @@
+const fs = require('fs/promises');
+const path = require('path');
+const { config } = require('./config');
+const { readArchiveHistory, readForecastActuals, readLatestManualQuote } = require('./storage');
+
+const SOURCE_TIMEOUT_MS = 9000;
+
+const officialSources = [
+  {
+    id: 'bog',
+    category: 'Bank of Ghana',
+    title: 'Bank of Ghana',
+    url: 'https://www.bog.gov.gh/',
+    cadence: '15 min',
+    keywords: ['foreign exchange', 'fx auction', 'monetary policy', 'cash reserve ratio', 'crr'],
+    impact: 'Usually supports the cedi when BoG supplies USD or tightens liquidity'
+  },
+  {
+    id: 'treasury',
+    category: 'Treasury',
+    title: 'Treasury',
+    url: 'https://mofep.gov.gh/',
+    cadence: '30 min',
+    keywords: ['treasury bill', 'bond', 'auction', 'issuance', 'debt'],
+    impact: 'Affects cedi liquidity and short-term USD demand'
+  },
+  {
+    id: 'imf',
+    category: 'IMF',
+    title: 'IMF',
+    url: 'https://www.imf.org/en/Countries/GHA',
+    cadence: '30 min',
+    keywords: ['ghana', 'review', 'disbursement', 'staff-level agreement', 'program'],
+    impact: 'Positive for cedi sentiment when reviews and disbursements progress'
+  },
+  {
+    id: 'fed',
+    category: 'Fed / US Data',
+    title: 'Fed / US Data',
+    url: 'https://www.federalreserve.gov/newsevents/pressreleases.htm',
+    cadence: '30 min',
+    keywords: ['federal funds', 'inflation', 'employment', 'fomc', 'rate'],
+    impact: 'Drives global USD strength and risk appetite'
+  },
+  {
+    id: 'bls',
+    category: 'US CPI / NFP',
+    title: 'Fed / US Data',
+    url: 'https://www.bls.gov/news.release/',
+    cadence: '30 min',
+    keywords: ['consumer price index', 'employment situation', 'payroll', 'cpi', 'unemployment'],
+    impact: 'CPI and NFP shift global USD strength'
+  },
+  {
+    id: 'news-myjoy',
+    category: 'Ghana News',
+    title: 'News Sentiment',
+    url: 'https://www.myjoyonline.com/business/',
+    cadence: '10 min',
+    keywords: ['budget', 'cedi', 'exchange rate', 'fiscal', 'debt', 'ghana'],
+    impact: 'Political and fiscal developments influence market sentiment'
+  },
+  {
+    id: 'news-citinews',
+    category: 'Ghana News',
+    title: 'News Sentiment',
+    url: 'https://citinewsroom.com/category/business/',
+    cadence: '10 min',
+    keywords: ['cedi', 'forex', 'budget', 'fiscal', 'debt', 'treasury'],
+    impact: 'Local market headlines influence sentiment'
+  }
+];
+
+const commoditySources = [
+  {
+    id: 'gold',
+    category: 'Gold',
+    title: 'Gold',
+    url: 'https://www.lbma.org.uk/prices-and-data/precious-metal-prices',
+    cadence: '30 min',
+    keywords: ['gold', 'price', 'usd', 'ounce'],
+    impact: 'Supports FX reserves and cedi sentiment when prices are firm'
+  },
+  {
+    id: 'cocoa',
+    category: 'Cocoa',
+    title: 'Cocoa',
+    url: 'https://www.icco.org/',
+    cadence: '60 min',
+    keywords: ['cocoa', 'prices', 'production', 'exports'],
+    impact: 'Supports FX supply when receipts and export volumes improve'
+  }
+];
+
+const baseMarket = {
+  pair: 'USD/GHS',
+  interbankRate: 11.02,
+  previousClose: 11.07,
+  weeklyMove: -1.2,
+  expectedRange: '10.88 - 11.12',
+  demandPressure: 'Normal',
+  liquidity: 'Tightening'
+};
+
+const signalTemplates = {
+  'Bank of Ghana': {
+    status: 'Supportive',
+    value: 18,
+    description: 'FX supply window active; latest notices show liquidity management bias.',
+    impact: 'Cedi supportive',
+    color: 'green'
+  },
+  Treasury: {
+    status: 'Absorbing',
+    value: 7,
+    description: 'T-bill settlement expected to pull excess cedi liquidity from banks.',
+    impact: 'Cedi supportive',
+    color: 'teal'
+  },
+  IMF: {
+    status: 'Constructive',
+    value: 9,
+    description: 'Program headlines remain positive with review risk currently low.',
+    impact: 'Sentiment supportive',
+    color: 'blue'
+  },
+  Gold: {
+    status: 'Firm',
+    value: 11,
+    description: 'Spot gold strength supports reserve and export-flow expectations.',
+    impact: 'FX supply supportive',
+    color: 'amber'
+  },
+  Cocoa: {
+    status: 'Neutral',
+    value: 2,
+    description: 'Receipts stable; no major export-flow shock flagged overnight.',
+    impact: 'Limited impact',
+    color: 'brown'
+  },
+  'Fed / US Data': {
+    status: 'USD bid',
+    value: -8,
+    description: 'US rate expectations keep some defensive USD demand in place.',
+    impact: 'USD supportive',
+    color: 'red'
+  },
+  Interbank: {
+    status: 'Softer USD',
+    value: 14,
+    description: 'Quotes drifted lower with cleaner supply and lighter importer bids.',
+    impact: 'Cedi supportive',
+    color: 'green'
+  },
+  'News Sentiment': {
+    status: 'Watch',
+    value: -3,
+    description: 'Fiscal and political headlines are mixed but not yet market-moving.',
+    impact: 'Slight USD support',
+    color: 'slate'
+  }
+};
+
+const forecastDrivers = [
+  {
+    key: 'bogAuctions',
+    label: 'BoG FX Auctions',
+    weight: 25,
+    direction: 'Cedi Positive',
+    signalTitle: 'Bank of Ghana'
+  },
+  {
+    key: 'liquidity',
+    label: 'Liquidity / T-Bills',
+    weight: 15,
+    direction: 'Cedi Positive',
+    signalTitle: 'Treasury'
+  },
+  {
+    key: 'imf',
+    label: 'IMF Developments',
+    weight: 10,
+    direction: 'Cedi Positive',
+    signalTitle: 'IMF'
+  },
+  {
+    key: 'gold',
+    label: 'Gold Prices',
+    weight: 10,
+    direction: 'Cedi Positive',
+    signalTitle: 'Gold'
+  },
+  {
+    key: 'cocoa',
+    label: 'Cocoa Inflows',
+    weight: 10,
+    direction: 'Cedi Positive',
+    signalTitle: 'Cocoa'
+  },
+  {
+    key: 'fed',
+    label: 'Fed & US Data',
+    weight: 15,
+    direction: 'USD Positive',
+    signalTitle: 'Fed / US Data'
+  },
+  {
+    key: 'marketDemand',
+    label: 'Market Demand',
+    weight: 10,
+    direction: 'USD Positive',
+    signalTitle: 'Interbank'
+  },
+  {
+    key: 'news',
+    label: 'News Sentiment',
+    weight: 5,
+    direction: 'Either',
+    signalTitle: 'News Sentiment'
+  }
+];
+
+function timeoutSignal(ms) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ms);
+  return { controller, timeout };
+}
+
+function stripHtml(html) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&#8217;/g, "'")
+    .replace(/&#8211;/g, '-')
+    .replace(/&#038;/g, '&')
+    .replace(/&#\d+;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function findHeadlineSnippets(text, keywords) {
+  const lower = text.toLowerCase();
+  return keywords
+    .map((keyword) => {
+      const index = lower.indexOf(keyword.toLowerCase());
+      if (index === -1) return null;
+      const start = Math.max(0, index - 80);
+      const end = Math.min(text.length, index + 170);
+      return text.slice(start, end).trim();
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+}
+
+async function fetchJsonUrl(url, parser) {
+  if (!url) return null;
+  const { controller, timeout } = timeoutSignal(SOURCE_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) return null;
+    const json = await response.json();
+    return parser(json);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchSource(source) {
+  const { controller, timeout } = timeoutSignal(SOURCE_TIMEOUT_MS);
+  const startedAt = Date.now();
+
+  try {
+    const response = await fetch(source.url, {
+      signal: controller.signal,
+      headers: {
+        'user-agent': 'USD-GHS-Market-Intelligence-Agent/0.2'
+      }
+    });
+    const html = await response.text();
+    const text = stripHtml(html);
+    const snippets = findHeadlineSnippets(text, source.keywords);
+
+    return {
+      ...source,
+      online: response.ok,
+      status: response.ok ? 'Online' : `HTTP ${response.status}`,
+      lastSeen: new Date().toISOString(),
+      latencyMs: Date.now() - startedAt,
+      score: response.ok ? Math.max(70, 100 - Math.round((Date.now() - startedAt) / 250)) : 58,
+      headlines: snippets.length ? snippets : [`Connected to ${source.category}; no priority keyword found in first page scan.`]
+    };
+  } catch (error) {
+    return {
+      ...source,
+      online: false,
+      status: 'Fallback',
+      lastSeen: new Date().toISOString(),
+      latencyMs: Date.now() - startedAt,
+      score: 52,
+      headlines: [`Live fetch unavailable for ${source.category}; using cached analyst assumptions.`],
+      error: error.name === 'AbortError' ? 'Timed out' : error.message
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchInterbankQuote() {
+  const apiQuote = await fetchJsonUrl(config.interbankApiUrl, (json) => ({
+    rate: Number(json.rate || json.mid || json.usdghs || json.price),
+    previousClose: Number(json.previousClose || json.previous_close || json.prev || baseMarket.previousClose),
+    source: json.source || 'Interbank API'
+  }));
+
+  if (apiQuote?.rate) {
+    return { ...apiQuote, status: 'Live API' };
+  }
+
+  const manualQuote = await readLatestManualQuote();
+  if (manualQuote?.rate) {
+    return {
+      rate: manualQuote.rate,
+      previousClose: baseMarket.previousClose,
+      source: manualQuote.source || 'Manual interbank quote',
+      status: 'Manual'
+    };
+  }
+
+  return {
+    rate: baseMarket.interbankRate,
+    previousClose: baseMarket.previousClose,
+    source: 'Seeded fallback',
+    status: 'Fallback'
+  };
+}
+
+async function fetchLicensedNews() {
+  const feedSources = [
+    { id: 'reuters', category: 'Reuters', url: config.reutersFeedUrl },
+    { id: 'bloomberg', category: 'Bloomberg', url: config.bloombergFeedUrl }
+  ].filter((source) => source.url);
+
+  const remoteFeeds = await Promise.all(
+    feedSources.map((source) =>
+      fetchSource({
+        ...source,
+        title: 'News Sentiment',
+        cadence: 'Live',
+        keywords: ['ghana', 'cedi', 'eurobond', 'cocoa', 'gold', 'imf', 'fiscal'],
+        impact: 'Licensed market news affects trader sentiment'
+      })
+    )
+  );
+
+  let localFeeds = [];
+  try {
+    const files = await fs.readdir(config.licensedNewsDir);
+    const textFiles = files.filter((file) => file.endsWith('.txt') || file.endsWith('.md'));
+    localFeeds = await Promise.all(
+      textFiles.slice(0, 10).map(async (file) => {
+        const content = await fs.readFile(path.join(config.licensedNewsDir, file), 'utf8');
+        return {
+          id: `licensed-${file}`,
+          category: file.includes('bloomberg') ? 'Bloomberg' : file.includes('reuters') ? 'Reuters' : 'Licensed News',
+          title: 'News Sentiment',
+          cadence: 'File import',
+          online: true,
+          status: 'Imported',
+          score: 88,
+          lastSeen: new Date().toISOString(),
+          headlines: findHeadlineSnippets(content, ['ghana', 'cedi', 'imf', 'cocoa', 'gold']).slice(0, 3),
+          impact: 'Licensed news import affects sentiment'
+        };
+      })
+    );
+  } catch (error) {
+    localFeeds = [];
+  }
+
+  return [...remoteFeeds, ...localFeeds];
+}
+
+function sourceMentions(source, terms) {
+  const text = source.headlines.join(' ').toLowerCase();
+  return terms.some((term) => text.includes(term));
+}
+
+function buildSignals({ sources, quote }) {
+  const grouped = new Map();
+  for (const source of sources) {
+    const title = source.title || source.category;
+    if (!grouped.has(title)) grouped.set(title, []);
+    grouped.get(title).push(source);
+  }
+
+  const signals = Object.keys(signalTemplates).map((title) => {
+    const template = signalTemplates[title];
+    const related = grouped.get(title) || [];
+    let value = template.value;
+    let status = template.status;
+    let description = template.description;
+
+    if (title === 'Bank of Ghana' && related.some((source) => sourceMentions(source, ['auction', 'crr', 'foreign exchange']))) {
+      value += 3;
+      status = 'Active';
+      description = 'BoG source scan found FX, CRR, or policy language relevant to USD/GHS.';
+    }
+
+    if (title === 'Treasury' && related.some((source) => sourceMentions(source, ['treasury bill', 'bond', 'auction']))) {
+      value += 2;
+      status = 'Liquidity focus';
+    }
+
+    if (title === 'IMF' && related.some((source) => sourceMentions(source, ['review', 'disbursement', 'staff-level']))) {
+      value += 2;
+      status = 'Program watch';
+    }
+
+    if (title === 'Fed / US Data' && related.some((source) => sourceMentions(source, ['inflation', 'payroll', 'fomc', 'consumer price']))) {
+      value -= 2;
+      status = 'US data watch';
+    }
+
+    if (title === 'Interbank' && quote.status === 'Live API') {
+      status = 'Live quote';
+      description = `Using connected interbank feed from ${quote.source}.`;
+    } else if (title === 'Interbank' && quote.status === 'Manual') {
+      status = 'Manual quote';
+      description = `Using latest manually imported quote from ${quote.source}.`;
+    }
+
+    return {
+      title,
+      status,
+      value: value > 0 ? `+${value}` : `${value}`,
+      description,
+      impact: template.impact,
+      color: template.color
+    };
+  });
+
+  return signals;
+}
+
+function buildMarketState(quote, signals) {
+  const dailyMove = Number((((quote.rate - quote.previousClose) / quote.previousClose) * 100).toFixed(2));
+  const net = signals.reduce((total, signal) => total + Number(signal.value || 0), 0);
+  const confidence = Math.min(88, Math.max(45, 58 + Math.round(Math.abs(net) / 2)));
+  const outlook =
+    net > 18 ? 'Mildly Bearish USD' : net < -10 ? 'Bullish USD' : 'Neutral USD/GHS';
+  const cediView = net > 18 ? 'Bullish Cedi' : net < -10 ? 'Bearish Cedi' : 'Mixed Cedi';
+  const lower = Math.max(0, quote.rate - 0.14).toFixed(2);
+  const upper = (quote.rate + 0.1).toFixed(2);
+
+  return {
+    ...baseMarket,
+    interbankRate: quote.rate,
+    previousClose: quote.previousClose,
+    dailyMove,
+    expectedRange: `${lower} - ${upper}`,
+    outlook,
+    cediView,
+    confidence,
+    quoteSource: quote.source,
+    quoteStatus: quote.status,
+    lastUpdated:
+      new Date().toLocaleTimeString('en-GB', {
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'UTC'
+      }) + ' GMT'
+  };
+}
+
+function buildProbabilities(signals) {
+  const net = signals.reduce((total, signal) => total + Number(signal.value || 0), 0);
+  const lower = Math.min(65, Math.max(22, 36 + Math.round(net / 3)));
+  const higher = Math.min(48, Math.max(12, 32 - Math.round(net / 4)));
+  const range = Math.max(10, 100 - lower - higher);
+
+  return [
+    { label: 'USD/GHS lower', value: lower, color: 'cedi' },
+    { label: 'Range-bound', value: range, color: 'range' },
+    { label: 'USD/GHS higher', value: higher, color: 'usd' }
+  ];
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function tomorrowIsoDate() {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
+function scoreToOutlook(score) {
+  if (score >= 70) return 'Strong Cedi Tomorrow';
+  if (score >= 30) return 'Moderate Cedi Strength';
+  if (score > -30) return 'Neutral';
+  if (score > -70) return 'Moderate USD Strength';
+  return 'Strong USD Strength';
+}
+
+function scoreToDirection(score) {
+  if (score >= 15) return 'USD/GHS Expected to Decline Slightly';
+  if (score <= -15) return 'USD/GHS Expected to Rise Slightly';
+  return 'USD/GHS Expected to Trade Range-Bound';
+}
+
+function buildForecast({ marketState, signals }) {
+  const signalMap = new Map(signals.map((signal) => [signal.title, Number(signal.value || 0)]));
+  const factors = forecastDrivers.map((driver) => {
+    const rawSignal = signalMap.get(driver.signalTitle) || 0;
+    const signedSignal = driver.direction === 'USD Positive' ? -Math.abs(rawSignal) : rawSignal;
+    const score = clamp(Math.round((signedSignal / 25) * driver.weight), -driver.weight, driver.weight);
+    return {
+      ...driver,
+      rawSignal,
+      score
+    };
+  });
+
+  const totalScore = clamp(
+    factors.reduce((total, factor) => total + factor.score, 0),
+    -100,
+    100
+  );
+  const probabilityLower = clamp(50 + Math.round(totalScore * 0.35), 18, 82);
+  const probabilityHigher = 100 - probabilityLower;
+  const confidence = clamp(52 + Math.round(Math.abs(totalScore) * 0.65), 50, 88);
+  const center = marketState.interbankRate + (totalScore >= 15 ? -0.03 : totalScore <= -15 ? 0.04 : 0);
+  const lower = Math.max(0, center - 0.07).toFixed(2);
+  const upper = (center + 0.07).toFixed(2);
+  const positiveDrivers = factors
+    .filter((factor) => factor.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5)
+    .map((factor) => `${factor.label}: +${factor.score}`);
+  const riskFactors = factors
+    .filter((factor) => factor.score < 0)
+    .sort((a, b) => a.score - b.score)
+    .slice(0, 4)
+    .map((factor) => `${factor.label}: ${factor.score}`);
+
+  return {
+    forecastDate: tomorrowIsoDate(),
+    totalScore,
+    outlook: scoreToOutlook(totalScore),
+    direction: scoreToDirection(totalScore),
+    probabilityHigher,
+    probabilityLower,
+    confidence,
+    expectedRange: `${lower} - ${upper}`,
+    factors,
+    keyDrivers: positiveDrivers.length
+      ? positiveDrivers
+      : ['No single cedi-positive driver is dominant today.'],
+    riskFactors: riskFactors.length
+      ? riskFactors
+      : ['Unexpected offshore demand', 'Stronger-than-expected US data'],
+    conclusion:
+      totalScore >= 15
+        ? 'Current information favors modest cedi appreciation over the next trading session.'
+        : totalScore <= -15
+          ? 'Current information favors modest USD/GHS upside risk over the next trading session.'
+          : 'Current information favors a range-bound USD/GHS session.'
+  };
+}
+
+function buildRegime({ signals, forecast }) {
+  const signalMap = new Map(signals.map((signal) => [signal.title, Number(signal.value || 0)]));
+  const cediSupport =
+    (signalMap.get('Bank of Ghana') || 0) + (signalMap.get('Treasury') || 0) + (signalMap.get('IMF') || 0) + (signalMap.get('Gold') || 0);
+  const demandStress = Math.max(0, -(signalMap.get('Interbank') || 0)) + Math.max(0, -(signalMap.get('News Sentiment') || 0));
+  const globalUsd = Math.max(0, -(signalMap.get('Fed / US Data') || 0));
+
+  if (globalUsd >= 12 && globalUsd >= cediSupport / 3) {
+    return {
+      name: 'GLOBAL USD STRENGTH',
+      expectedDirection: 'Upward',
+      description: 'Strong US data or hawkish Fed conditions are supporting the dollar.',
+      score: globalUsd
+    };
+  }
+
+  if (demandStress >= 15 || forecast.totalScore <= -30) {
+    return {
+      name: 'USD DEMAND STRESS',
+      expectedDirection: 'Upward',
+      description: 'Local USD demand pressure is outweighing available supply.',
+      score: demandStress
+    };
+  }
+
+  return {
+    name: 'CEDI SUPPORTIVE',
+    expectedDirection: 'Downward',
+    description: 'BoG, liquidity, IMF, and commodity factors are supportive for the cedi.',
+    score: cediSupport
+  };
+}
+
+function buildDealerSignal({ forecast, marketState }) {
+  const bias =
+    forecast.totalScore >= 30
+      ? 'Bullish Cedi'
+      : forecast.totalScore <= -30
+        ? 'Bullish USD'
+        : forecast.totalScore >= 10
+          ? 'Slightly Bullish Cedi'
+          : forecast.totalScore <= -10
+            ? 'Slightly Bullish USD'
+            : 'Neutral';
+  const conviction = (clamp(5 + Math.abs(forecast.totalScore) / 20, 4.5, 9.2)).toFixed(1);
+  return {
+    shortTermBias: bias,
+    conviction: Number(conviction),
+    positioningView:
+      forecast.totalScore >= 10
+        ? 'Expect exporters to sell USD and local demand to remain moderate.'
+        : forecast.totalScore <= -10
+          ? 'Expect importers to bid more actively and exporters to hold back supply.'
+          : 'Expect two-way interest with limited directional conviction.',
+    risk: marketState.quoteStatus === 'Fallback' ? 'Medium: interbank feed is fallback' : forecast.confidence > 75 ? 'Low' : 'Medium'
+  };
+}
+
+function buildAccuracyTracker(history, manualActuals = []) {
+  const rows = [];
+  const actualMap = new Map(manualActuals.map((actual) => [actual.date, actual]));
+  for (let index = 0; index < history.length - 1; index += 1) {
+    const forecastSnapshot = history[index];
+    const actualSnapshot = history[index + 1];
+    const forecast = forecastSnapshot.forecast;
+    if (!forecast) continue;
+
+    const forecastDirection =
+      forecast.probabilityLower > forecast.probabilityHigher ? 'USD/GHS Down' : 'USD/GHS Up';
+    const manualActual = actualMap.get(forecast.forecastDate);
+    const actualDirection = manualActual
+      ? manualActual.direction
+      : actualSnapshot.marketState.interbankRate < forecastSnapshot.marketState.interbankRate
+        ? 'Down'
+        : actualSnapshot.marketState.interbankRate > forecastSnapshot.marketState.interbankRate
+          ? 'Up'
+          : 'Flat';
+    const correct =
+      (forecastDirection === 'USD/GHS Down' && actualDirection === 'Down') ||
+      (forecastDirection === 'USD/GHS Up' && actualDirection === 'Up');
+
+    rows.push({
+      date: forecast.forecastDate,
+      forecast: forecastDirection,
+      actualResult: actualDirection,
+      correct
+    });
+  }
+
+  for (const manualActual of manualActuals) {
+    const alreadyIncluded = rows.some((row) => row.date === manualActual.date);
+    const matchingSnapshot = history.find((snapshot) => snapshot.forecast?.forecastDate === manualActual.date);
+    if (alreadyIncluded || !matchingSnapshot?.forecast) continue;
+
+    const forecastDirection =
+      matchingSnapshot.forecast.probabilityLower > matchingSnapshot.forecast.probabilityHigher
+        ? 'USD/GHS Down'
+        : 'USD/GHS Up';
+    rows.push({
+      date: manualActual.date,
+      forecast: forecastDirection,
+      actualResult: manualActual.direction,
+      correct:
+        (forecastDirection === 'USD/GHS Down' && manualActual.direction === 'Down') ||
+        (forecastDirection === 'USD/GHS Up' && manualActual.direction === 'Up')
+    });
+  }
+
+  function accuracy(limit) {
+    const slice = rows.slice(-limit);
+    if (!slice.length) return null;
+    const correct = slice.filter((row) => row.correct).length;
+    return Math.round((correct / slice.length) * 100);
+  }
+
+  return {
+    currentAccuracy: accuracy(30),
+    sevenDayAccuracy: accuracy(7),
+    thirtyDayAccuracy: accuracy(30),
+    ninetyDayAccuracy: accuracy(90),
+    samples: rows.slice(-10)
+  };
+}
+
+function buildDeliverables() {
+  return [
+    { time: '07:00', name: 'Morning Brief', purpose: 'What happened overnight?' },
+    { time: '12:00', name: 'Midday Update', purpose: "What's happening now?" },
+    { time: '17:00', name: 'Close of Market Report', purpose: 'What happened today?' },
+    { time: '17:05', name: 'Next-Day Forecast', purpose: 'Will USD/GHS rise or fall tomorrow?' },
+    { time: 'Real-time', name: 'Alerts', purpose: 'BoG, IMF, Fed, gold, cocoa, liquidity, and unusual demand events.' },
+    { time: 'Continuous', name: 'Forecast Accuracy Dashboard', purpose: 'Evaluate and improve predictions.' }
+  ];
+}
+
+function buildAiPrompt({ marketState, signals, probability, sources, forecast, regime, dealerSignal }) {
+  return JSON.stringify({
+    instruction:
+      'Return JSON only with keys morning, midday, close, afternoon, executive. Each note must include title, time, outlook, summary, bullets. The afternoon note must include the next-day USD/GHS forecast.',
+    marketState,
+    signals,
+    probability,
+    forecast,
+    regime,
+    dealerSignal,
+    sourceHeadlines: sources.slice(0, 12).map((source) => ({
+      category: source.category,
+      headlines: source.headlines
+    }))
+  });
+}
+
+function normalizeNotesJson(text) {
+  if (!text) return null;
+  const trimmed = text.trim();
+  const jsonText = trimmed.startsWith('{')
+    ? trimmed
+    : trimmed.slice(trimmed.indexOf('{'), trimmed.lastIndexOf('}') + 1);
+  const parsed = JSON.parse(jsonText);
+  return parsed?.morning && parsed?.afternoon && parsed?.executive ? parsed : null;
+}
+
+async function callOpenAiResponses(prompt) {
+  if (!config.openaiApiKey) return null;
+  const { controller, timeout } = timeoutSignal(30000);
+  const payload = {
+    model: config.openaiModel,
+    input: [
+      {
+        role: 'system',
+        content:
+          'You are a Ghana FX market analyst. Produce concise USD/GHS morning, afternoon, and executive market notes as JSON only.'
+      },
+      { role: 'user', content: prompt }
+    ],
+    text: { format: { type: 'json_object' } }
+  };
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        authorization: `Bearer ${config.openaiApiKey}`,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) return null;
+    const json = await response.json();
+    return normalizeNotesJson(json.output_text || json.output?.[0]?.content?.[0]?.text);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function callOpenAiCompatible({ apiKey, baseUrl, model, prompt, provider }) {
+  if (!apiKey) return null;
+  const { controller, timeout } = timeoutSignal(30000);
+  try {
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+        'http-referer': config.publicBaseUrl,
+        'x-title': 'USD/GHS Market Intelligence Agent'
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a Ghana FX market analyst. Return valid JSON only. No markdown.'
+          },
+          { role: 'user', content: prompt }
+        ],
+        response_format: provider === 'groq' ? undefined : { type: 'json_object' },
+        temperature: 0.2
+      })
+    });
+    if (!response.ok) return null;
+    const json = await response.json();
+    return normalizeNotesJson(json.choices?.[0]?.message?.content);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function buildAiNotes({ marketState, signals, probability, sources, forecast, regime, dealerSignal }) {
+  const prompt = buildAiPrompt({ marketState, signals, probability, sources, forecast, regime, dealerSignal });
+
+  try {
+    if (config.aiProvider === 'deepseek') {
+      return await callOpenAiCompatible({
+        apiKey: config.deepseekApiKey,
+        baseUrl: 'https://api.deepseek.com',
+        model: config.deepseekModel,
+        prompt,
+        provider: 'deepseek'
+      });
+    }
+
+    if (config.aiProvider === 'openrouter') {
+      return await callOpenAiCompatible({
+        apiKey: config.openrouterApiKey,
+        baseUrl: 'https://openrouter.ai/api/v1',
+        model: config.openrouterModel,
+        prompt,
+        provider: 'openrouter'
+      });
+    }
+
+    if (config.aiProvider === 'groq') {
+      return await callOpenAiCompatible({
+        apiKey: config.groqApiKey,
+        baseUrl: 'https://api.groq.com/openai/v1',
+        model: config.groqModel,
+        prompt,
+        provider: 'groq'
+      });
+    }
+
+    return await callOpenAiResponses(prompt);
+  } catch {
+    return null;
+  }
+}
+
+function buildFallbackNotes({ marketState, signals, probability, forecast, regime, dealerSignal }) {
+  const topDrivers = signals
+    .filter((signal) => Number(signal.value) > 0)
+    .sort((a, b) => Number(b.value) - Number(a.value))
+    .slice(0, 4)
+    .map((signal) => `${signal.title}: ${signal.impact.toLowerCase()}`);
+
+  return {
+    morning: {
+      title: 'USD/GHS Morning Brief',
+      time: `Generated ${marketState.lastUpdated}`,
+      outlook: `${marketState.outlook} / ${marketState.cediView}`,
+      summary: 'Supply is slightly ahead of demand after softer interbank quotes and supportive official-sector conditions.',
+      bullets: [
+        `Current interbank rate: ${marketState.interbankRate.toFixed(2)}.`,
+        `Yesterday's move: ${marketState.dailyMove}% against the USD.`,
+        `Expected range: ${marketState.expectedRange}.`,
+        `Highest probability: ${probability[0].label} at ${probability[0].value}%.`,
+        ...topDrivers
+      ]
+    },
+    midday: {
+      title: 'USD/GHS Midday Update',
+      time: 'Generated 12:00 GMT',
+      outlook: `${marketState.outlook} / ${marketState.cediView}`,
+      summary: 'Midday conditions remain anchored by source health, interbank direction, and demand/supply balance.',
+      bullets: [
+        `Current interbank rate: ${marketState.interbankRate.toFixed(2)}.`,
+        `Regime: ${regime.name}.`,
+        `Dealer signal: ${dealerSignal.shortTermBias} with ${dealerSignal.conviction}/10 conviction.`,
+        `Probability USD/GHS lower tomorrow: ${forecast.probabilityLower}%.`
+      ]
+    },
+    close: {
+      title: 'USD/GHS Close of Market Report',
+      time: 'Generated 17:00 GMT',
+      outlook: `${marketState.outlook} / ${marketState.cediView}`,
+      summary: 'Close report summarizes today’s drivers and prepares the next-day forecast.',
+      bullets: [
+        `Daily score: ${forecast.totalScore}.`,
+        `Tomorrow's bias: ${forecast.outlook}.`,
+        `Expected range tomorrow: ${forecast.expectedRange}.`,
+        `Main risks: ${forecast.riskFactors.join('; ')}.`
+      ]
+    },
+    afternoon: {
+      title: 'USD/GHS Afternoon Watch',
+      time: 'Scheduled 14:30 GMT',
+      outlook: forecast.direction,
+      summary: `NEXT-DAY USD/GHS FORECAST: ${forecast.conclusion}`,
+      bullets: [
+        `Forecast date: ${forecast.forecastDate}.`,
+        `USD/GHS higher tomorrow: ${forecast.probabilityHigher}%.`,
+        `USD/GHS lower tomorrow: ${forecast.probabilityLower}%.`,
+        `Confidence level: ${forecast.confidence}%.`,
+        `Expected trading range: ${forecast.expectedRange}.`,
+        `Key drivers: ${forecast.keyDrivers.join('; ')}.`,
+        `Risk factors: ${forecast.riskFactors.join('; ')}.`
+      ]
+    },
+    executive: {
+      title: 'Executive Snapshot',
+      time: 'One-page version',
+      outlook: 'Cedi-positive bias with global USD risk',
+      summary: 'Designed for executives who need the call, the range, and the main risks in under a minute.',
+      bullets: [
+        `Base case: USD/GHS trades inside ${marketState.expectedRange}.`,
+        'Upside risk comes from Fed repricing or concentrated importer demand.',
+        'Downside risk comes from BoG supply, stronger gold, and cleaner market liquidity.',
+        'Recommended action: stagger near-term USD purchases while quotes remain offered.'
+      ]
+    }
+  };
+}
+
+function buildFlowReadings(signals) {
+  const net = signals.reduce((total, signal) => total + Number(signal.value || 0), 0);
+  return [
+    { label: 'Corporate USD bids', value: net > 20 ? 38 : 55, tone: net > 20 ? 'good' : 'watch' },
+    { label: 'Exporter supply', value: net > 20 ? 72 : 58, tone: 'good' },
+    { label: 'Bank liquidity stress', value: net > 20 ? 34 : 48, tone: net > 20 ? 'good' : 'watch' },
+    { label: 'Headline risk', value: 44, tone: 'watch' }
+  ];
+}
+
+function buildAlerts({ marketState, signals }) {
+  const fedSignal = signals.find((signal) => signal.title === 'Fed / US Data');
+  const interbankSignal = signals.find((signal) => signal.title === 'Interbank');
+  return [
+    {
+      title: 'Importer bid concentration',
+      severity: marketState.demandPressure === 'High' ? 'Risk' : 'Watch',
+      detail: 'Energy, manufacturing, and corporate demand should be compared against afternoon quote depth.'
+    },
+    {
+      title: 'Global USD repricing',
+      severity: Number(fedSignal?.value || 0) < -8 ? 'Risk' : 'Watch',
+      detail: 'Hot US CPI, NFP, or Fed repricing would weaken the cedi-positive setup.'
+    },
+    {
+      title: 'Interbank feed status',
+      severity: marketState.quoteStatus === 'Fallback' ? 'Risk' : 'Support',
+      detail: `${interbankSignal?.status || 'Interbank'}: ${marketState.quoteSource}.`
+    }
+  ];
+}
+
+function buildSourceHealth(sources, quote) {
+  const health = sources.map((source) => ({
+    name: source.category,
+    cadence: source.cadence,
+    lastSeen: new Date(source.lastSeen).toLocaleTimeString('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'UTC'
+    }),
+    status: source.status,
+    score: source.score,
+    headlines: source.headlines,
+    url: source.url,
+    impact: source.impact
+  }));
+
+  health.unshift({
+    name: 'Interbank USD/GHS',
+    cadence: '5 min',
+    lastSeen: new Date().toLocaleTimeString('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'UTC'
+    }),
+    status: quote.status,
+    score: quote.status === 'Fallback' ? 55 : 96,
+    headlines: [`${quote.source}: ${quote.rate}`],
+    url: config.interbankApiUrl || 'data/interbank-quotes.csv',
+    impact: 'Immediate market direction'
+  });
+
+  return health;
+}
+
+function buildEvents() {
+  return [
+    { time: '07:00', title: 'Morning market note', tag: 'Delivery', tone: 'good' },
+    { time: '09:30', title: 'BoG notice scan', tag: 'Automated', tone: 'good' },
+    { time: '11:00', title: 'Treasury auction result check', tag: 'Liquidity', tone: 'watch' },
+    { time: '12:30', title: 'Gold and cocoa flow refresh', tag: 'Commodities', tone: 'good' },
+    { time: '13:30', title: 'US CPI / Fed calendar monitor', tag: 'Global USD', tone: 'risk' },
+    { time: '12:00', title: 'Midday market update', tag: 'Delivery', tone: 'good' },
+    { time: '17:00', title: 'Close of market report', tag: 'Delivery', tone: 'good' },
+    { time: '17:05', title: 'Next-day forecast', tag: 'Forecast', tone: 'good' }
+  ];
+}
+
+function buildDeliveryChannels() {
+  return [
+    {
+      label: 'Email brief',
+      status: config.smtp.host && config.smtp.to ? 'Configured' : 'Needs SMTP config'
+    },
+    {
+      label: 'WhatsApp / Telegram',
+      status:
+        config.twilio.accountSid || config.telegram.botToken
+          ? 'Alert channel configured'
+          : 'Needs Twilio or Telegram config'
+    },
+    { label: 'Data archive', status: 'Every refresh' },
+    { label: 'Dealer note export', status: 'Manual send' }
+  ];
+}
+
+async function buildIntelligence() {
+  const [official, commodities, licensedNews, quote] = await Promise.all([
+    Promise.all(officialSources.map(fetchSource)),
+    Promise.all(commoditySources.map(fetchSource)),
+    fetchLicensedNews(),
+    fetchInterbankQuote()
+  ]);
+  const allSources = [...official, ...commodities, ...licensedNews];
+  const signals = buildSignals({ sources: allSources, quote });
+  const marketState = buildMarketState(quote, signals);
+  const probability = buildProbabilities(signals);
+  const forecast = buildForecast({ marketState, signals });
+  const regime = buildRegime({ signals, forecast });
+  const dealerSignal = buildDealerSignal({ forecast, marketState });
+  const history = await readArchiveHistory(120);
+  const manualActuals = await readForecastActuals();
+  const accuracyTracker = buildAccuracyTracker(history, manualActuals);
+  const aiNotes = await buildAiNotes({ marketState, signals, probability, sources: allSources, forecast, regime, dealerSignal });
+  const notes = aiNotes || buildFallbackNotes({ marketState, signals, probability, forecast, regime, dealerSignal });
+
+  return {
+    generatedAt: new Date().toISOString(),
+    marketState,
+    signals,
+    probability,
+    forecast,
+    regime,
+    dealerSignal,
+    accuracyTracker,
+    notes,
+    events: buildEvents(),
+    deliverables: buildDeliverables(),
+    alerts: buildAlerts({ marketState, signals }),
+    sourceHealth: buildSourceHealth(allSources, quote),
+    flowReadings: buildFlowReadings(signals),
+    deliveryChannels: buildDeliveryChannels(),
+    sourcePolicy: {
+      reutersBloomberg:
+        'Connect licensed Reuters/Bloomberg feeds through REUTERS_FEED_URL, BLOOMBERG_FEED_URL, or LICENSED_NEWS_DIR imports.',
+      liveData:
+        'Public official-source connectors are enabled. Interbank, Reuters, Bloomberg, OpenAI, SMTP, and messaging channels require credentials or feed URLs.'
+    }
+  };
+}
+
+module.exports = {
+  buildIntelligence
+};

@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: usd-ghs-market-intelligence-agent
+    env: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: AI_PROVIDER
+        value: groq
