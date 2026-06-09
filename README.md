@@ -127,7 +127,8 @@ Content-Type: application/json
 - Exports latest snapshot, history, forecasts, signals, and accuracy as CSV.
 - Flags demand-condition risks and support factors.
 - Archives refreshed intelligence snapshots to `data/snapshots.jsonl`.
-- Imports manual interbank USD/GHS quotes from the API.
+- Pulls USD/GHS rate data in this order: custom interbank feed, CediRates API, BoG Daily Interbank FX Rates, CediRates public bank average, manual quote, then seeded fallback.
+- Imports manual interbank USD/GHS quotes from the API as an override when live feeds are unavailable.
 - Supports optional live interbank, gold, cocoa, Reuters, and Bloomberg feed URLs through `.env`.
 - Supports optional OpenAI-powered note generation when `OPENAI_API_KEY` is configured.
 - Supports alternative AI note providers: DeepSeek, OpenRouter, and Groq.
@@ -136,7 +137,7 @@ Content-Type: application/json
 
 ## Data Notes
 
-The current interbank rate and signal values are seeded analyst assumptions until a licensed FX quote feed is connected.
+USD/GHS quote priority is now: `INTERBANK_API_URL`, `CEDIRATES_API_KEY`, BoG Daily Interbank FX Rates, CediRates public USD/GHS bank average, manual quote import, then a clearly marked seeded fallback. The CediRates public fallback uses bank buying/selling/mid rows from `https://cedirates.com/exchange-rates/usd-to-ghs/`; BoG uses `https://www.bog.gov.gh/treasury-and-the-markets/daily-interbank-fx-rates/`.
 
 Reuters and Bloomberg should be connected through licensed APIs, terminal exports, approved email ingestion, or permitted RSS/feed products. The app intentionally avoids scraping paywalled Reuters or Bloomberg pages.
 

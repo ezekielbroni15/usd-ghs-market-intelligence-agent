@@ -4,6 +4,9 @@ const { config } = require('./config');
 const { readArchiveHistory, readForecastActuals, readLatestManualQuote } = require('./storage');
 
 const SOURCE_TIMEOUT_MS = 9000;
+const BOG_DAILY_INTERBANK_URL = 'https://www.bog.gov.gh/treasury-and-the-markets/daily-interbank-fx-rates/';
+const CEDIRATES_USD_GHS_URL = 'https://cedirates.com/exchange-rates/usd-to-ghs/';
+const CEDIRATES_PUBLIC_RATES_URL = 'https://cedirates.com/api/v1/rates?baseCurrency=USD&quoteCurrency=GHS';
 
 const officialSources = [
   {
@@ -259,7 +262,13 @@ async function fetchJsonUrl(url, parser) {
   if (!url) return null;
   const { controller, timeout } = timeoutSignal(SOURCE_TIMEOUT_MS);
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        accept: 'application/json',
+        'user-agent': 'USD-GHS-Market-Intelligence-Agent/0.3'
+      }
+    });
     if (!response.ok) return null;
     const json = await response.json();
     return parser(json);
@@ -268,6 +277,244 @@ async function fetchJsonUrl(url, parser) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function fetchTextUrl(url, options = {}) {
+  const { controller, timeout } = timeoutSignal(options.timeoutMs || SOURCE_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      method: options.method || 'GET',
+      signal: controller.signal,
+      headers: {
+        accept: options.accept || 'text/html,application/json',
+        'content-type': options.contentType || 'application/x-www-form-urlencoded',
+        'user-agent': 'USD-GHS-Market-Intelligence-Agent/0.3',
+        ...(options.headers || {})
+      },
+      body: options.body
+    });
+    if (!response.ok) return null;
+    return await response.text();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function numberOrNull(value) {
+  const number = Number(String(value ?? '').replace(/,/g, '').trim());
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function plausibleUsdGhsRate(value) {
+  const number = numberOrNull(value);
+  return number && number >= 5 && number <= 30 ? number : null;
+}
+
+function average(numbers) {
+  const valid = numbers.map(plausibleUsdGhsRate).filter(Boolean);
+  if (!valid.length) return null;
+  return Number((valid.reduce((total, value) => total + value, 0) / valid.length).toFixed(4));
+}
+
+function jsonRowsFromAny(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'object') return [];
+  for (const key of ['data', 'rates', 'items', 'results', 'records', 'rows']) {
+    if (Array.isArray(value[key])) return value[key];
+  }
+  return [];
+}
+
+function summarizeCediRatesRows(rows, source) {
+  const usdRows = rows.filter((row) => {
+    const base = String(row.baseCurrency || row.base || row.from || row.currency || '').toUpperCase();
+    const quote = String(row.quoteCurrency || row.quote || row.to || '').toUpperCase();
+    const pair = String(row.pair || row.currencyPair || row.cd_currency_pair || '').toUpperCase();
+    return (base === 'USD' && quote === 'GHS') || pair === 'USDGHS' || pair === 'USD/GHS';
+  });
+
+  const rowsToUse = usdRows.length ? usdRows : rows;
+  const mids = rowsToUse
+    .map((row) => plausibleUsdGhsRate(row.mid || row.average || row.rate || row.value || row.price))
+    .filter(Boolean);
+  const buySellMids = rowsToUse
+    .map((row) => {
+      const buying = plausibleUsdGhsRate(row.buying || row.buy || row.bid);
+      const selling = plausibleUsdGhsRate(row.selling || row.sell || row.ask);
+      return buying && selling ? Number(((buying + selling) / 2).toFixed(4)) : null;
+    })
+    .filter(Boolean);
+  const rate = average([...mids, ...buySellMids]);
+  if (!rate) return null;
+
+  const buying = average(rowsToUse.map((row) => row.buying || row.buy || row.bid));
+  const selling = average(rowsToUse.map((row) => row.selling || row.sell || row.ask));
+  const latestUpdate = rowsToUse
+    .map((row) => row.lastUpdatedAt || row.updatedAt || row.date)
+    .filter(Boolean)
+    .sort()
+    .at(-1);
+
+  return {
+    rate,
+    previousClose: rate,
+    source,
+    status: source.includes('API') ? 'CediRates API' : 'CediRates Public',
+    buying,
+    selling,
+    providerRows: rowsToUse.length,
+    providerLastUpdated: latestUpdate
+  };
+}
+
+function extractQuoteFromGenericJson(json, source = 'Interbank API') {
+  const directRate = plausibleUsdGhsRate(json?.rate || json?.mid || json?.usdghs || json?.price);
+  if (directRate) {
+    return {
+      rate: directRate,
+      previousClose: plausibleUsdGhsRate(json.previousClose || json.previous_close || json.prev) || directRate,
+      source: json.source || source
+    };
+  }
+
+  const cediRows = summarizeCediRatesRows(jsonRowsFromAny(json), source);
+  if (cediRows) return cediRows;
+  return null;
+}
+
+async function fetchCediRatesApiQuote() {
+  if (!config.cediRatesApiKey) return null;
+
+  const headers = {
+    authorization: `Bearer ${config.cediRatesApiKey}`,
+    'x-api-key': config.cediRatesApiKey,
+    apikey: config.cediRatesApiKey
+  };
+  const urls = [
+    'https://public-api.cedirates.com/api/v1/rates?baseCurrency=USD&quoteCurrency=GHS',
+    'https://public-api.cedirates.com/v1/rates?baseCurrency=USD&quoteCurrency=GHS',
+    'https://public-api.cedirates.com/rates?baseCurrency=USD&quoteCurrency=GHS'
+  ];
+
+  for (const url of urls) {
+    const text = await fetchTextUrl(url, {
+      accept: 'application/json',
+      contentType: 'application/json',
+      headers
+    });
+    if (!text) continue;
+    try {
+      const quote = summarizeCediRatesRows(jsonRowsFromAny(JSON.parse(text)), 'CediRates API');
+      if (quote) return quote;
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+async function fetchCediRatesPublicQuote() {
+  const jsonText = await fetchTextUrl(CEDIRATES_PUBLIC_RATES_URL, {
+    accept: 'application/json',
+    contentType: 'application/json'
+  });
+  if (jsonText) {
+    try {
+      const quote = summarizeCediRatesRows(jsonRowsFromAny(JSON.parse(jsonText)), 'CediRates bank average');
+      if (quote) return quote;
+    } catch {
+      // Continue to page text fallback.
+    }
+  }
+
+  const html = await fetchTextUrl(CEDIRATES_USD_GHS_URL);
+  if (!html) return null;
+  const text = stripHtml(html);
+  const usdWindow = findHeadlineSnippets(text, ['Dollar to Cedi', 'US Dollars', 'USD', 'GHS']).join(' ');
+  const numbers = [...usdWindow.matchAll(/\b\d{1,2}(?:\.\d{1,4})\b/g)].map((match) => match[0]);
+  const rate = average(numbers);
+  return rate
+    ? {
+        rate,
+        previousClose: rate,
+        source: 'CediRates public page',
+        status: 'CediRates Public'
+      }
+    : null;
+}
+
+function summarizeBogRows(rows) {
+  for (const row of rows) {
+    const values = Array.isArray(row) ? row : Object.values(row || {});
+    const text = values.join(' ').replace(/<[^>]+>/g, ' ');
+    if (!/(USDGHS|US Dollar|USD\/GHS)/i.test(text)) continue;
+    const numbers = values.flatMap((value) => String(value).match(/\b\d{1,2}(?:\.\d{1,4})\b/g) || []);
+    const rate = average(numbers);
+    if (rate) {
+      return {
+        rate,
+        previousClose: rate,
+        source: 'Bank of Ghana Daily Interbank FX Rates',
+        status: 'BoG Daily Rate'
+      };
+    }
+  }
+  return null;
+}
+
+async function fetchBogInterbankQuote() {
+  const html = await fetchTextUrl(BOG_DAILY_INTERBANK_URL, { timeoutMs: 12000 });
+  if (!html) return null;
+
+  const nonceMatch = html.match(/name="wdtNonceFrontendServerSide_31" value="([^"]+)"/i);
+  const nonce = nonceMatch?.[1];
+  if (nonce) {
+    const body = new URLSearchParams({
+      draw: '1',
+      start: '0',
+      length: '25',
+      'search[value]': '',
+      'search[regex]': 'false',
+      'order[0][column]': '0',
+      'order[0][dir]': 'desc',
+      wdtNonceFrontendServerSide_31: nonce
+    }).toString();
+    const jsonText = await fetchTextUrl('https://www.bog.gov.gh/wp-admin/admin-ajax.php?action=get_wdtable&table_id=31', {
+      method: 'POST',
+      accept: 'application/json',
+      body,
+      headers: {
+        referer: BOG_DAILY_INTERBANK_URL,
+        'x-requested-with': 'XMLHttpRequest'
+      },
+      timeoutMs: 12000
+    });
+    if (jsonText) {
+      try {
+        const quote = summarizeBogRows(jsonRowsFromAny(JSON.parse(jsonText)));
+        if (quote) return quote;
+      } catch {
+        // Continue to HTML fallback.
+      }
+    }
+  }
+
+  const text = stripHtml(html);
+  const snippets = findHeadlineSnippets(text, ['US Dollar', 'USDGHS', 'USD/GHS']);
+  const numbers = snippets.flatMap((snippet) => snippet.match(/\b\d{1,2}(?:\.\d{1,4})\b/g) || []);
+  const rate = average(numbers);
+  return rate
+    ? {
+        rate,
+        previousClose: rate,
+        source: 'Bank of Ghana Daily Interbank FX Rates',
+        status: 'BoG Daily Rate'
+      }
+    : null;
 }
 
 async function fetchSource(source) {
@@ -311,14 +558,25 @@ async function fetchSource(source) {
 }
 
 async function fetchInterbankQuote() {
-  const apiQuote = await fetchJsonUrl(config.interbankApiUrl, (json) => ({
-    rate: Number(json.rate || json.mid || json.usdghs || json.price),
-    previousClose: Number(json.previousClose || json.previous_close || json.prev || baseMarket.previousClose),
-    source: json.source || 'Interbank API'
-  }));
+  const apiQuote = await fetchJsonUrl(config.interbankApiUrl, (json) => extractQuoteFromGenericJson(json, 'Interbank API'));
 
   if (apiQuote?.rate) {
     return { ...apiQuote, status: 'Live API' };
+  }
+
+  const cediRatesApiQuote = await fetchCediRatesApiQuote();
+  if (cediRatesApiQuote?.rate) {
+    return cediRatesApiQuote;
+  }
+
+  const bogQuote = await fetchBogInterbankQuote();
+  if (bogQuote?.rate) {
+    return bogQuote;
+  }
+
+  const cediRatesPublicQuote = await fetchCediRatesPublicQuote();
+  if (cediRatesPublicQuote?.rate) {
+    return cediRatesPublicQuote;
   }
 
   const manualQuote = await readLatestManualQuote();
@@ -334,7 +592,7 @@ async function fetchInterbankQuote() {
   return {
     rate: baseMarket.interbankRate,
     previousClose: baseMarket.previousClose,
-    source: 'Seeded fallback',
+    source: 'Seeded fallback - not live market data',
     status: 'Fallback'
   };
 }
@@ -429,6 +687,15 @@ function buildSignals({ sources, quote }) {
     if (title === 'Interbank' && quote.status === 'Live API') {
       status = 'Live quote';
       description = `Using connected interbank feed from ${quote.source}.`;
+    } else if (title === 'Interbank' && quote.status === 'CediRates API') {
+      status = 'CediRates API';
+      description = `Using CediRates USD/GHS bank-rate average from ${quote.providerRows || 'available'} contributors.`;
+    } else if (title === 'Interbank' && quote.status === 'BoG Daily Rate') {
+      status = 'BoG daily rate';
+      description = 'Using the Bank of Ghana Daily Interbank FX Rates page.';
+    } else if (title === 'Interbank' && quote.status === 'CediRates Public') {
+      status = 'CediRates public';
+      description = `Using CediRates public USD/GHS bank-rate average from ${quote.providerRows || 'available'} contributors.`;
     } else if (title === 'Interbank' && quote.status === 'Manual') {
       status = 'Manual quote';
       description = `Using latest manually imported quote from ${quote.source}.`;
@@ -468,6 +735,10 @@ function buildMarketState(quote, signals) {
     confidence,
     quoteSource: quote.source,
     quoteStatus: quote.status,
+    quoteBuying: quote.buying || null,
+    quoteSelling: quote.selling || null,
+    quoteProviderRows: quote.providerRows || null,
+    quoteProviderLastUpdated: quote.providerLastUpdated || null,
     lastUpdated:
       new Date().toLocaleTimeString('en-GB', {
         hour: '2-digit',
@@ -978,8 +1249,14 @@ function buildSourceHealth(sources, quote) {
     }),
     status: quote.status,
     score: quote.status === 'Fallback' ? 55 : 96,
-    headlines: [`${quote.source}: ${quote.rate}`],
-    url: config.interbankApiUrl || 'data/interbank-quotes.csv',
+    headlines: [
+      `${quote.source}: ${quote.rate}`,
+      quote.buying && quote.selling ? `Average buying/selling: ${quote.buying} / ${quote.selling}` : null,
+      quote.providerRows ? `${quote.providerRows} CediRates contributors included` : null
+    ].filter(Boolean),
+    url:
+      config.interbankApiUrl ||
+      (quote.status === 'BoG Daily Rate' ? BOG_DAILY_INTERBANK_URL : quote.status?.startsWith('CediRates') ? CEDIRATES_USD_GHS_URL : 'data/interbank-quotes.csv'),
     impact: 'Immediate market direction'
   });
 
@@ -1057,7 +1334,7 @@ async function buildIntelligence() {
       reutersBloomberg:
         'Connect licensed Reuters/Bloomberg feeds through REUTERS_FEED_URL, BLOOMBERG_FEED_URL, or LICENSED_NEWS_DIR imports.',
       liveData:
-        'Public official-source connectors are enabled. Interbank, Reuters, Bloomberg, OpenAI, SMTP, and messaging channels require credentials or feed URLs.'
+        'Public official-source connectors are enabled. USD/GHS rate priority is custom interbank feed, CediRates API, BoG Daily Interbank FX Rates, CediRates public bank average, manual quote, then clearly marked fallback. Reuters, Bloomberg, OpenAI, SMTP, and messaging channels require credentials or feed URLs.'
     }
   };
 }

@@ -40,6 +40,7 @@ const config = {
   groqApiKey: process.env.GROQ_API_KEY || '',
   groqModel: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
   interbankApiUrl: process.env.INTERBANK_API_URL || '',
+  cediRatesApiKey: process.env.CEDIRATES_API_KEY || '',
   goldApiUrl: process.env.GOLD_API_URL || '',
   cocoaApiUrl: process.env.COCOA_API_URL || '',
   reutersFeedUrl: process.env.REUTERS_FEED_URL || '',

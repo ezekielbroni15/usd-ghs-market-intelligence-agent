@@ -48,6 +48,7 @@ async function getIntelligence({ force = false, archive = false } = {}) {
 function configStatus() {
   return {
     interbankApi: Boolean(config.interbankApiUrl),
+    cediRatesApi: Boolean(config.cediRatesApiKey),
     goldApi: Boolean(config.goldApiUrl),
     cocoaApi: Boolean(config.cocoaApiUrl),
     aiProvider: config.aiProvider,
