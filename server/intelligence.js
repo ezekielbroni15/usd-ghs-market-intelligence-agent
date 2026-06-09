@@ -357,6 +357,18 @@ function summarizeCediRatesRows(rows, source) {
     .filter(Boolean)
     .sort()
     .at(-1);
+  const contributors = rowsToUse
+    .map((row) => ({
+      name: row.company?.companyName || row.companyName || row.name || row.source || 'Unnamed provider',
+      type: row.company?.subCategory?.name || row.type || 'Provider',
+      buying: plausibleUsdGhsRate(row.buying || row.buy || row.bid),
+      selling: plausibleUsdGhsRate(row.selling || row.sell || row.ask),
+      midRate: plausibleUsdGhsRate(row.mid || row.average || row.rate || row.value || row.price),
+      lastUpdatedAt: row.lastUpdatedAt || row.updatedAt || row.date || null
+    }))
+    .filter((row) => row.buying || row.selling || row.midRate)
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+    .slice(0, 20);
 
   return {
     rate,
@@ -366,7 +378,8 @@ function summarizeCediRatesRows(rows, source) {
     buying,
     selling,
     providerRows: rowsToUse.length,
-    providerLastUpdated: latestUpdate
+    providerLastUpdated: latestUpdate,
+    contributors
   };
 }
 
@@ -739,6 +752,7 @@ function buildMarketState(quote, signals) {
     quoteSelling: quote.selling || null,
     quoteProviderRows: quote.providerRows || null,
     quoteProviderLastUpdated: quote.providerLastUpdated || null,
+    quoteContributors: quote.contributors || [],
     lastUpdated:
       new Date().toLocaleTimeString('en-GB', {
         hour: '2-digit',

@@ -49,7 +49,13 @@ const marketState = {
   confidence: 72,
   demandPressure: 'Normal',
   liquidity: 'Tightening',
-  lastUpdated: '08:15 GMT'
+  lastUpdated: '08:15 GMT',
+  quoteSource: 'Fallback sample',
+  quoteStatus: 'Fallback',
+  quoteBuying: null,
+  quoteSelling: null,
+  quoteProviderRows: null,
+  quoteContributors: []
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8787';
@@ -340,6 +346,70 @@ function MetricCard({ label, value, meta, trend }) {
       </div>
       <p>{meta}</p>
     </article>
+  );
+}
+
+function QuoteTable({ market }) {
+  const contributors = market.quoteContributors || [];
+
+  return (
+    <section className="quote-table-panel">
+      <div className="section-heading compact">
+        <div>
+          <span>{market.quoteStatus || 'Quote source'}</span>
+          <h2>CediRates USD/GHS Providers</h2>
+        </div>
+        <LineChart size={20} />
+      </div>
+      <div className="quote-summary-row">
+        <div>
+          <span>Mid average</span>
+          <strong>{market.interbankRate?.toFixed ? market.interbankRate.toFixed(4) : market.interbankRate}</strong>
+        </div>
+        <div>
+          <span>Buying avg</span>
+          <strong>{market.quoteBuying ? market.quoteBuying.toFixed(4) : 'N/A'}</strong>
+        </div>
+        <div>
+          <span>Selling avg</span>
+          <strong>{market.quoteSelling ? market.quoteSelling.toFixed(4) : 'N/A'}</strong>
+        </div>
+        <div>
+          <span>Source</span>
+          <strong>{market.quoteSource || 'N/A'}</strong>
+        </div>
+      </div>
+      <div className="quote-table-wrap">
+        <table className="quote-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Buying</th>
+              <th>Selling</th>
+              <th>MidRate</th>
+            </tr>
+          </thead>
+          <tbody>
+            {contributors.map((row) => (
+              <tr key={`${row.name}-${row.buying}-${row.selling}`}>
+                <td>
+                  <strong>{row.name}</strong>
+                  <span>{row.type}</span>
+                </td>
+                <td>{row.buying ? row.buying.toFixed(4) : 'N/A'}</td>
+                <td>{row.selling ? row.selling.toFixed(4) : 'N/A'}</td>
+                <td>{row.midRate ? row.midRate.toFixed(4) : 'N/A'}</td>
+              </tr>
+            ))}
+            {!contributors.length && (
+              <tr>
+                <td colSpan="4">Provider rows will appear when CediRates or another structured quote source responds.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
@@ -901,6 +971,8 @@ function App() {
         <MetricCard label="Supply score" value="74 / 100" meta="BoG, gold, and normal demand support" trend="up" />
         <MetricCard label="Risk score" value="38 / 100" meta="Fed and fiscal headlines are watch items" trend="flat" />
       </section>
+
+      <QuoteTable market={currentMarket} />
 
       <section className="ops-grid">
         <SourceHealthTable sourceHealth={currentSourceHealth} />

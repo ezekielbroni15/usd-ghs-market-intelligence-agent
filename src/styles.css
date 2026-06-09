@@ -388,6 +388,76 @@ button {
   margin: 18px 0;
 }
 
+.quote-table-panel {
+  border: 1px solid rgba(29, 58, 54, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 20px 55px rgba(31, 55, 53, 0.09);
+  padding: 20px;
+  margin-bottom: 18px;
+}
+
+.quote-summary-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.quote-summary-row div {
+  border-radius: 8px;
+  background: #f6f9f8;
+  padding: 12px;
+}
+
+.quote-summary-row span,
+.quote-table td span {
+  display: block;
+  color: #66716e;
+  font-size: 0.76rem;
+}
+
+.quote-summary-row strong {
+  display: block;
+  margin-top: 5px;
+  font-size: 1rem;
+}
+
+.quote-table-wrap {
+  overflow-x: auto;
+}
+
+.quote-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 620px;
+}
+
+.quote-table th,
+.quote-table td {
+  text-align: left;
+  border-bottom: 1px solid #edf1f0;
+  padding: 11px 10px;
+  font-size: 0.88rem;
+}
+
+.quote-table th {
+  color: #66716e;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0;
+  background: #f6f9f8;
+}
+
+.quote-table td:not(:first-child) {
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+}
+
+.quote-table tbody tr:hover {
+  background: #fbfdfc;
+}
+
 .metric-card {
   min-height: 132px;
   padding: 18px;
@@ -1200,7 +1270,8 @@ button {
   .signal-ops-grid,
   .flow-grid,
   .export-list,
-  .forecast-probs {
+  .forecast-probs,
+  .quote-summary-row {
     grid-template-columns: 1fr;
   }
 
