@@ -727,8 +727,30 @@ function buildSignals({ sources, quote }) {
   return signals;
 }
 
-function buildMarketState(quote, signals) {
-  const dailyMove = Number((((quote.rate - quote.previousClose) / quote.previousClose) * 100).toFixed(2));
+function resolvePreviousClose(quote, history) {
+  const previousSnapshot = [...history]
+    .reverse()
+    .find((snapshot) => {
+      const previousRate = plausibleUsdGhsRate(snapshot.marketState?.interbankRate);
+      return previousRate && snapshot.marketState?.quoteStatus !== 'Fallback';
+    });
+
+  if (previousSnapshot?.marketState?.interbankRate) {
+    return {
+      previousClose: previousSnapshot.marketState.interbankRate,
+      moveBasis: `Last archived ${previousSnapshot.marketState.quoteSource || 'market'} rate`
+    };
+  }
+
+  return {
+    previousClose: quote.previousClose,
+    moveBasis: quote.previousClose === quote.rate ? 'No prior live archive yet' : 'Source-provided previous close'
+  };
+}
+
+function buildMarketState(quote, signals, history = []) {
+  const { previousClose, moveBasis } = resolvePreviousClose(quote, history);
+  const dailyMove = Number((((quote.rate - previousClose) / previousClose) * 100).toFixed(2));
   const net = signals.reduce((total, signal) => total + Number(signal.value || 0), 0);
   const confidence = Math.min(88, Math.max(45, 58 + Math.round(Math.abs(net) / 2)));
   const outlook =
@@ -740,8 +762,9 @@ function buildMarketState(quote, signals) {
   return {
     ...baseMarket,
     interbankRate: quote.rate,
-    previousClose: quote.previousClose,
+    previousClose,
     dailyMove,
+    moveBasis,
     expectedRange: `${lower} - ${upper}`,
     outlook,
     cediView,
@@ -920,15 +943,27 @@ function buildDealerSignal({ forecast, marketState }) {
 function buildAccuracyTracker(history, manualActuals = []) {
   const rows = [];
   const actualMap = new Map(manualActuals.map((actual) => [actual.date, actual]));
-  for (let index = 0; index < history.length - 1; index += 1) {
-    const forecastSnapshot = history[index];
-    const actualSnapshot = history[index + 1];
+
+  const forecastSnapshots = new Map();
+  for (const snapshot of history) {
+    if (snapshot.forecast?.forecastDate) {
+      forecastSnapshots.set(snapshot.forecast.forecastDate, snapshot);
+    }
+  }
+
+  for (const forecastSnapshot of forecastSnapshots.values()) {
     const forecast = forecastSnapshot.forecast;
     if (!forecast) continue;
 
     const forecastDirection =
       forecast.probabilityLower > forecast.probabilityHigher ? 'USD/GHS Down' : 'USD/GHS Up';
     const manualActual = actualMap.get(forecast.forecastDate);
+    const actualSnapshot = history.find((snapshot) => {
+      const snapshotDate = (snapshot.generatedAt || '').slice(0, 10);
+      return snapshotDate >= forecast.forecastDate && snapshot.marketState?.interbankRate;
+    });
+    if (!manualActual && !actualSnapshot) continue;
+
     const actualDirection = manualActual
       ? manualActual.direction
       : actualSnapshot.marketState.interbankRate < forecastSnapshot.marketState.interbankRate
@@ -1317,12 +1352,12 @@ async function buildIntelligence() {
   ]);
   const allSources = [...official, ...commodities, ...licensedNews];
   const signals = buildSignals({ sources: allSources, quote });
-  const marketState = buildMarketState(quote, signals);
+  const history = await readArchiveHistory(120);
+  const marketState = buildMarketState(quote, signals, history);
   const probability = buildProbabilities(signals);
   const forecast = buildForecast({ marketState, signals });
   const regime = buildRegime({ signals, forecast });
   const dealerSignal = buildDealerSignal({ forecast, marketState });
-  const history = await readArchiveHistory(120);
   const manualActuals = await readForecastActuals();
   const accuracyTracker = buildAccuracyTracker(history, manualActuals);
   const aiNotes = await buildAiNotes({ marketState, signals, probability, sources: allSources, forecast, regime, dealerSignal });

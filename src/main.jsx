@@ -55,7 +55,8 @@ const marketState = {
   quoteBuying: null,
   quoteSelling: null,
   quoteProviderRows: null,
-  quoteContributors: []
+  quoteContributors: [],
+  moveBasis: 'Fallback sample'
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8787';
@@ -966,7 +967,7 @@ function App() {
       </section>
 
       <section className="metric-grid">
-        <MetricCard label="Previous close" value={currentMarket.previousClose.toFixed(2)} meta="Yesterday's interbank reference" trend="down" />
+        <MetricCard label="Previous close" value={currentMarket.previousClose.toFixed(2)} meta={currentMarket.moveBasis || "Yesterday's interbank reference"} trend="down" />
         <MetricCard label="7-day move" value={`${currentMarket.weeklyMove}%`} meta="Cedi strengthened over the week" trend="down" />
         <MetricCard label="Supply score" value="74 / 100" meta="BoG, gold, and normal demand support" trend="up" />
         <MetricCard label="Risk score" value="38 / 100" meta="Fed and fiscal headlines are watch items" trend="flat" />
