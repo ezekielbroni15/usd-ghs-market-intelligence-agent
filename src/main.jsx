@@ -13,6 +13,7 @@ import {
   Clock3,
   Cpu,
   Database,
+  ExternalLink,
   Factory,
   FileText,
   Gauge,
@@ -33,6 +34,7 @@ import {
   TrendingDown,
   TrendingUp,
   WalletCards,
+  X,
   Zap
 } from 'lucide-react';
 import './styles.css';
@@ -56,6 +58,7 @@ const marketState = {
   quoteSelling: null,
   quoteProviderRows: null,
   quoteContributors: [],
+  quoteRemittanceRows: [],
   moveBasis: 'Fallback sample'
 };
 
@@ -350,34 +353,186 @@ function MetricCard({ label, value, meta, trend }) {
   );
 }
 
-function QuoteTable({ market }) {
-  const contributors = market.quoteContributors || [];
+function averageValues(rows, key) {
+  const values = rows.map((row) => Number(row[key])).filter((value) => Number.isFinite(value) && value > 0);
+  if (!values.length) return null;
+  return values.reduce((total, value) => total + value, 0) / values.length;
+}
+
+function formatRate(value) {
+  return Number.isFinite(Number(value)) ? Number(value).toFixed(4) : 'N/A';
+}
+
+function MultiSelectGroup({ label, options, selected, onChange }) {
+  const selectedLabel = selected.includes('All') ? 'All' : selected.join(', ');
+
+  function toggle(option) {
+    if (option === 'All') {
+      onChange(['All']);
+      return;
+    }
+    const withoutAll = selected.filter((item) => item !== 'All');
+    const next = withoutAll.includes(option)
+      ? withoutAll.filter((item) => item !== option)
+      : [...withoutAll, option];
+    onChange(next.length ? next : ['All']);
+  }
+
+  return (
+    <div className="multi-select">
+      <span>{label}</span>
+      <details>
+        <summary>
+          <strong>{selectedLabel}</strong>
+          <ChevronRight size={15} />
+        </summary>
+        <div className="multi-select-menu">
+          {options.map((option) => (
+            <label key={option}>
+              <input
+                type="checkbox"
+                checked={selected.includes(option)}
+                onChange={() => toggle(option)}
+              />
+              {option}
+            </label>
+          ))}
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function QuoteTable({ market, onFilteredRateChange }) {
+  const [mode, setMode] = useState('market');
+  const [typeFilter, setTypeFilter] = useState(['All']);
+  const [sourceFilter, setSourceFilter] = useState(['All']);
+  const [page, setPage] = useState(1);
+  const rows = mode === 'remittance'
+    ? (market.quoteContributors || []).filter((row) => /remittance|money transfer/i.test(`${row.type} ${row.slug}`))
+    : market.quoteContributors || [];
+  const providerTypes = ['All', ...Array.from(new Set(rows.map((row) => row.type).filter(Boolean))).sort()];
+  const sources = ['All', ...Array.from(new Set(rows.map((row) => row.source).filter(Boolean))).sort()];
+  const filteredRows = rows.filter((row) => {
+    const typeOk = typeFilter.includes('All') || typeFilter.includes(row.type);
+    const sourceOk = sourceFilter.includes('All') || sourceFilter.includes(row.source);
+    return typeOk && sourceOk;
+  });
+  const pageSize = 10;
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const visibleRows = filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const calcBuying = averageValues(filteredRows, 'buying');
+  const calcSelling = averageValues(filteredRows, 'selling');
+  const calcMid = averageValues(filteredRows, 'midRate');
+
+  useEffect(() => {
+    onFilteredRateChange?.({
+      mode,
+      midRate: calcMid,
+      buying: calcBuying,
+      selling: calcSelling,
+      rowCount: filteredRows.length,
+      types: typeFilter,
+      sources: sourceFilter
+    });
+  }, [mode, calcMid, calcBuying, calcSelling, filteredRows.length, typeFilter.join('|'), sourceFilter.join('|')]);
+
+  function updateMode(nextMode) {
+    setMode(nextMode);
+    setTypeFilter(['All']);
+    setSourceFilter(['All']);
+    setPage(1);
+  }
+
+  function csvEscape(value) {
+    if (value === null || value === undefined) return '';
+    const text = String(value);
+    return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }
+
+  function exportFilteredRows() {
+    const headers = ['Name', 'Type', 'Source', 'Buying', 'Selling', 'MidRate', 'Last Updated', 'Source URL'];
+    const summaryRows = [
+      ['Filtered MidRate', '', '', '', '', formatRate(calcMid), '', ''],
+      ['Filtered Buying', '', '', formatRate(calcBuying), '', '', '', ''],
+      ['Filtered Selling', '', '', '', formatRate(calcSelling), '', '', ''],
+      ['Rows Used', filteredRows.length, '', '', '', '', '', ''],
+      []
+    ];
+    const dataRows = filteredRows.map((row) => [
+      row.name,
+      row.type,
+      row.source,
+      formatRate(row.buying),
+      formatRate(row.selling),
+      formatRate(row.midRate),
+      row.lastUpdatedAt || '',
+      row.sourceUrl || ''
+    ]);
+    const csv = [...summaryRows, headers, ...dataRows]
+      .map((row) => row.map(csvEscape).join(','))
+      .join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const selectedTypes = typeFilter.includes('All') ? 'all' : typeFilter.join('-').replace(/\s+/g, '-').toLowerCase();
+    const selectedMode = mode === 'remittance' ? 'remittance' : 'market';
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `usd-ghs-${selectedMode}-${selectedTypes}-rates.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <section className="quote-table-panel">
       <div className="section-heading compact">
         <div>
           <span>{market.quoteStatus || 'Quote source'}</span>
-          <h2>CediRates USD/GHS Providers</h2>
+          <h2>USD/GHS Rate Providers</h2>
         </div>
         <LineChart size={20} />
       </div>
+      <div className="quote-controls">
+        <div className="quote-mode-group">
+          <span>Rate view</span>
+          <div className="segmented-control" aria-label="Rate mode">
+            <button className={mode === 'market' ? 'active' : ''} type="button" onClick={() => updateMode('market')}>
+              Market
+            </button>
+            <button className={mode === 'remittance' ? 'active' : ''} type="button" onClick={() => updateMode('remittance')}>
+              Remittance
+            </button>
+          </div>
+        </div>
+        <MultiSelectGroup label="Provider type" options={providerTypes} selected={typeFilter} onChange={(next) => { setTypeFilter(next); setPage(1); }} />
+        <MultiSelectGroup label="Source" options={sources} selected={sourceFilter} onChange={(next) => { setSourceFilter(next); setPage(1); }} />
+        <div className="quote-filter-count">
+          <span>Rows</span>
+          <strong>{filteredRows.length}</strong>
+        </div>
+        <button className="table-export-button" type="button" onClick={exportFilteredRows} disabled={!filteredRows.length}>
+          Export CSV
+        </button>
+      </div>
       <div className="quote-summary-row">
         <div>
-          <span>Mid average</span>
-          <strong>{market.interbankRate?.toFixed ? market.interbankRate.toFixed(4) : market.interbankRate}</strong>
+          <span>Filtered MidRate</span>
+          <strong>{formatRate(calcMid)}</strong>
         </div>
         <div>
-          <span>Buying avg</span>
-          <strong>{market.quoteBuying ? market.quoteBuying.toFixed(4) : 'N/A'}</strong>
+          <span>Filtered buying</span>
+          <strong>{formatRate(calcBuying)}</strong>
         </div>
         <div>
-          <span>Selling avg</span>
-          <strong>{market.quoteSelling ? market.quoteSelling.toFixed(4) : 'N/A'}</strong>
+          <span>Filtered selling</span>
+          <strong>{formatRate(calcSelling)}</strong>
         </div>
         <div>
-          <span>Source</span>
-          <strong>{market.quoteSource || 'N/A'}</strong>
+          <span>Rows used</span>
+          <strong>{filteredRows.length}</strong>
         </div>
       </div>
       <div className="quote-table-wrap">
@@ -391,33 +546,46 @@ function QuoteTable({ market }) {
             </tr>
           </thead>
           <tbody>
-            {contributors.map((row) => (
-              <tr key={`${row.name}-${row.buying}-${row.selling}`}>
+            {visibleRows.map((row) => (
+              <tr key={`${row.source}-${row.name}-${row.buying}-${row.selling}`}>
                 <td>
                   <strong>{row.name}</strong>
-                  <span>{row.type}</span>
+                  <span>{row.type} · {row.source}</span>
                 </td>
-                <td>{row.buying ? row.buying.toFixed(4) : 'N/A'}</td>
-                <td>{row.selling ? row.selling.toFixed(4) : 'N/A'}</td>
-                <td>{row.midRate ? row.midRate.toFixed(4) : 'N/A'}</td>
+                <td>{formatRate(row.buying)}</td>
+                <td>{formatRate(row.selling)}</td>
+                <td>{formatRate(row.midRate)}</td>
               </tr>
             ))}
-            {!contributors.length && (
+            {!visibleRows.length && (
               <tr>
-                <td colSpan="4">Provider rows will appear when CediRates or another structured quote source responds.</td>
+                <td colSpan="4">
+                  {mode === 'remittance'
+                    ? 'No remittance rows are available from the connected sources yet.'
+                    : 'Provider rows will appear when CediRates, BoG, or another structured quote source responds.'}
+                </td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
+      <div className="pagination-row">
+        <button type="button" onClick={() => setPage(Math.max(1, currentPage - 1))} disabled={currentPage === 1}>
+          Previous
+        </button>
+        <span>Page {currentPage} of {totalPages}</span>
+        <button type="button" onClick={() => setPage(Math.min(totalPages, currentPage + 1))} disabled={currentPage === totalPages}>
+          Next
+        </button>
+      </div>
     </section>
   );
 }
 
-function SignalCard({ item }) {
+function SignalCard({ item, onInspect }) {
   const Icon = item.icon || signalIcons[item.title] || Activity;
   return (
-    <article className={`signal-card ${item.color}`}>
+    <article className={`signal-card ${item.color}`} onClick={() => onInspect(item.title, item.evidence || [])}>
       <div className="signal-top">
         <div className="source-icon">
           <Icon size={19} />
@@ -448,7 +616,24 @@ function ProbabilityBar({ item }) {
   );
 }
 
-function NotePanel({ note }) {
+function NotePanel({ note, onInspect }) {
+  const currentHour = new Date().getUTCHours();
+  const isAvailable = currentHour >= (note.availableAtHour ?? 0);
+  if (!isAvailable) {
+    return (
+      <section className="note-panel">
+        <div className="section-heading compact">
+          <div>
+            <span>Available at {String(note.availableAtHour).padStart(2, '0')}:00 UTC</span>
+            <h2>{note.title}</h2>
+          </div>
+          <FileText size={20} />
+        </div>
+        <p className="note-summary">This note will populate when the scheduled market window is reached.</p>
+      </section>
+    );
+  }
+
   return (
     <section className="note-panel">
       <div className="section-heading compact">
@@ -471,11 +656,14 @@ function NotePanel({ note }) {
           </li>
         ))}
       </ul>
+      <button className="source-button" type="button" onClick={() => onInspect(`${note.title} Sources`, note.sources || [])}>
+        View sources
+      </button>
     </section>
   );
 }
 
-function SourceHealthTable({ sourceHealth }) {
+function SourceHealthTable({ sourceHealth, onInspect }) {
   return (
     <section className="health-panel">
       <div className="section-heading compact">
@@ -487,7 +675,22 @@ function SourceHealthTable({ sourceHealth }) {
       </div>
       <div className="health-list">
         {sourceHealth.map((source) => (
-          <div className="health-row" key={source.name}>
+          <div
+            className="health-row"
+            key={source.name}
+            onClick={() =>
+              onInspect(
+                source.name,
+                (source.headlines || []).map((headline) => ({
+                  source: source.name,
+                  title: headline,
+                  url: source.url,
+                  status: source.status,
+                  impact: source.impact
+                }))
+              )
+            }
+          >
             <div>
               <strong>{source.name}</strong>
               <span>{source.cadence} cadence</span>
@@ -504,7 +707,7 @@ function SourceHealthTable({ sourceHealth }) {
   );
 }
 
-function AlertsPanel({ alerts }) {
+function AlertsPanel({ alerts, onInspect }) {
   return (
     <section className="alerts-panel">
       <div className="section-heading compact">
@@ -516,7 +719,7 @@ function AlertsPanel({ alerts }) {
       </div>
       <div className="alert-list">
         {alerts.map((alert) => (
-          <article className={`alert-item ${alert.severity.toLowerCase()}`} key={alert.title}>
+          <article className={`alert-item ${alert.severity.toLowerCase()}`} key={alert.title} onClick={() => onInspect(alert.title, alert.evidence || [])}>
             <strong>{alert.title}</strong>
             <span>{alert.severity}</span>
             <p>{alert.detail}</p>
@@ -527,7 +730,7 @@ function AlertsPanel({ alerts }) {
   );
 }
 
-function FlowPanel({ flowReadings }) {
+function FlowPanel({ flowReadings, onInspect }) {
   return (
     <section className="flow-panel">
       <div className="section-heading compact">
@@ -539,7 +742,7 @@ function FlowPanel({ flowReadings }) {
       </div>
       <div className="flow-grid">
         {flowReadings.map((item) => (
-          <div className={`flow-tile ${item.tone}`} key={item.label}>
+          <div className={`flow-tile ${item.tone}`} key={item.label} onClick={() => onInspect(item.label, item.evidence || [])}>
             <div className="dial" style={{ '--value': `${item.value * 3.6}deg` }}>
               <strong>{item.value}</strong>
             </div>
@@ -758,11 +961,52 @@ function ExportPanel() {
   );
 }
 
+function EvidenceDrawer({ detail, onClose }) {
+  if (!detail) return null;
+  const rows = detail.evidence || [];
+  return (
+    <div className="drawer-backdrop" role="presentation" onClick={onClose}>
+      <aside className="evidence-drawer" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+        <div className="drawer-heading">
+          <div>
+            <span>Source drill-down</span>
+            <h2>{detail.title}</h2>
+          </div>
+          <button type="button" onClick={onClose} title="Close">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="evidence-list">
+          {rows.map((item, index) => (
+            <article key={`${item.source}-${index}`}>
+              <strong>{item.source || 'Source'}</strong>
+              <p>{item.title || item.headline || 'No headline text available.'}</p>
+              <span>{item.status || item.impact || 'Live scan'}</span>
+              {item.url && (
+                <a href={item.url} target="_blank" rel="noreferrer">
+                  Open source <ExternalLink size={14} />
+                </a>
+              )}
+            </article>
+          ))}
+          {!rows.length && <p>No source rows were returned for this item yet.</p>}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
 function App() {
   const [activeNote, setActiveNote] = useState('morning');
   const [lastAction, setLastAction] = useState('Ready');
   const [intelligence, setIntelligence] = useState(fallbackIntelligence);
   const [apiStatus, setApiStatus] = useState('Using local fallback data');
+  const [sourceDetail, setSourceDetail] = useState(null);
+  const [filteredQuote, setFilteredQuote] = useState(null);
+
+  function inspectSources(title, evidence) {
+    setSourceDetail({ title, evidence });
+  }
 
   useEffect(() => {
     let isMounted = true;
@@ -826,6 +1070,13 @@ function App() {
   }
 
   const currentMarket = intelligence.marketState;
+  const displayedMarket = {
+    ...currentMarket,
+    interbankRate: filteredQuote?.midRate || currentMarket.interbankRate,
+    quoteBuying: filteredQuote?.buying || currentMarket.quoteBuying,
+    quoteSelling: filteredQuote?.selling || currentMarket.quoteSelling,
+    quoteProviderRows: filteredQuote?.rowCount || currentMarket.quoteProviderRows
+  };
   const currentSignals = intelligence.signals;
   const currentProbability = intelligence.probability;
   const currentNotes = intelligence.notes;
@@ -833,12 +1084,10 @@ function App() {
   const currentAlerts = intelligence.alerts;
   const currentSourceHealth = intelligence.sourceHealth;
   const currentFlowReadings = intelligence.flowReadings;
-  const currentDeliveryChannels = intelligence.deliveryChannels;
   const currentForecast = intelligence.forecast;
   const currentRegime = intelligence.regime;
   const currentDealerSignal = intelligence.dealerSignal;
   const currentAccuracy = intelligence.accuracyTracker;
-  const currentDeliverables = intelligence.deliverables;
 
   const cediScore = useMemo(
     () =>
@@ -886,24 +1135,24 @@ function App() {
             </span>
             <span>
               <Clock3 size={14} />
-              Updated {currentMarket.lastUpdated}
+              Updated {displayedMarket.lastUpdated}
             </span>
           </div>
           <div className="rate-row">
             <div>
-              <span>{currentMarket.pair} interbank</span>
-              <strong>{currentMarket.interbankRate.toFixed(2)}</strong>
+              <span>{displayedMarket.pair} filtered MidRate</span>
+              <strong>{displayedMarket.interbankRate.toFixed(2)}</strong>
             </div>
             <div className="move-badge positive">
               <TrendingDown size={18} />
-              {currentMarket.dailyMove}%
+              {displayedMarket.dailyMove}%
             </div>
           </div>
           <div className="hero-outlook">
             <div>
               <span>Outlook</span>
-              <h2>{currentMarket.outlook}</h2>
-              <p>{currentMarket.cediView}</p>
+              <h2>{displayedMarket.outlook}</h2>
+              <p>{filteredQuote?.rowCount ? `${filteredQuote.rowCount} selected provider rows` : displayedMarket.cediView}</p>
             </div>
             <div className="confidence-ring">
               <svg viewBox="0 0 120 120" aria-hidden="true">
@@ -913,11 +1162,11 @@ function App() {
                   cx="60"
                   cy="60"
                   r="48"
-                  style={{ strokeDashoffset: 302 - (302 * currentMarket.confidence) / 100 }}
+                  style={{ strokeDashoffset: 302 - (302 * displayedMarket.confidence) / 100 }}
                 />
               </svg>
               <div>
-                <strong>{currentMarket.confidence}%</strong>
+                <strong>{displayedMarket.confidence}%</strong>
                 <span>confidence</span>
               </div>
             </div>
@@ -925,15 +1174,15 @@ function App() {
           <div className="hero-footer">
             <div>
               <span>Expected range</span>
-              <strong>{currentMarket.expectedRange}</strong>
+              <strong>{displayedMarket.expectedRange}</strong>
             </div>
             <div>
               <span>Demand pressure</span>
-              <strong>{currentMarket.demandPressure}</strong>
+              <strong>{displayedMarket.demandPressure}</strong>
             </div>
             <div>
               <span>Liquidity</span>
-              <strong>{currentMarket.liquidity}</strong>
+              <strong>{displayedMarket.liquidity}</strong>
             </div>
             <div>
               <span>Net cedi score</span>
@@ -967,18 +1216,18 @@ function App() {
       </section>
 
       <section className="metric-grid">
-        <MetricCard label="Previous close" value={currentMarket.previousClose.toFixed(2)} meta={currentMarket.moveBasis || "Yesterday's interbank reference"} trend="down" />
+        <MetricCard label="Previous close" value={displayedMarket.previousClose.toFixed(2)} meta={displayedMarket.moveBasis || "Yesterday's interbank reference"} trend="down" />
         <MetricCard label="7-day move" value={`${currentMarket.weeklyMove}%`} meta="Cedi strengthened over the week" trend="down" />
         <MetricCard label="Supply score" value="74 / 100" meta="BoG, gold, and normal demand support" trend="up" />
         <MetricCard label="Risk score" value="38 / 100" meta="Fed and fiscal headlines are watch items" trend="flat" />
       </section>
 
-      <QuoteTable market={currentMarket} />
+      <QuoteTable market={currentMarket} onFilteredRateChange={setFilteredQuote} />
 
       <section className="ops-grid">
-        <SourceHealthTable sourceHealth={currentSourceHealth} />
-        <AlertsPanel alerts={currentAlerts} />
-        <FlowPanel flowReadings={currentFlowReadings} />
+        <SourceHealthTable sourceHealth={currentSourceHealth} onInspect={inspectSources} />
+        <AlertsPanel alerts={currentAlerts} onInspect={inspectSources} />
+        <FlowPanel flowReadings={currentFlowReadings} onInspect={inspectSources} />
       </section>
 
       <section className="forecast-grid">
@@ -998,12 +1247,10 @@ function App() {
           </div>
           <div className="signal-grid">
             {currentSignals.map((item) => (
-              <SignalCard item={item} key={item.title} />
+              <SignalCard item={item} key={item.title} onInspect={inspectSources} />
             ))}
           </div>
           <div className="signal-ops-grid">
-            <DeliveryPanel deliveryChannels={currentDeliveryChannels} />
-            <DeliverablesPanel deliverables={currentDeliverables} />
             <ExportPanel />
             <ConfigPanel intelligence={intelligence} />
           </div>
@@ -1059,8 +1306,9 @@ function App() {
             </button>
           ))}
         </div>
-        <NotePanel note={activeNoteData} />
+        <NotePanel note={activeNoteData} onInspect={inspectSources} />
       </section>
+      <EvidenceDrawer detail={sourceDetail} onClose={() => setSourceDetail(null)} />
     </main>
   );
 }

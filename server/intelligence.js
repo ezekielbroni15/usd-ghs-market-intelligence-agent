@@ -1,4 +1,5 @@
 const fs = require('fs/promises');
+const https = require('https');
 const path = require('path');
 const { config } = require('./config');
 const { readArchiveHistory, readForecastActuals, readLatestManualQuote } = require('./storage');
@@ -6,7 +7,7 @@ const { readArchiveHistory, readForecastActuals, readLatestManualQuote } = requi
 const SOURCE_TIMEOUT_MS = 9000;
 const BOG_DAILY_INTERBANK_URL = 'https://www.bog.gov.gh/treasury-and-the-markets/daily-interbank-fx-rates/';
 const CEDIRATES_USD_GHS_URL = 'https://cedirates.com/exchange-rates/usd-to-ghs/';
-const CEDIRATES_PUBLIC_RATES_URL = 'https://cedirates.com/api/v1/rates?baseCurrency=USD&quoteCurrency=GHS';
+const CEDIRATES_PUBLIC_RATES_URL = 'https://cedirates.com/api/v1/rates?baseCurrency=USD&quoteCurrency=GHS&limit=500';
 
 const officialSources = [
   {
@@ -302,6 +303,53 @@ async function fetchTextUrl(url, options = {}) {
   }
 }
 
+function fetchHttpsTextInsecure(url, options = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardTimeout);
+      resolve(value);
+    };
+    const hardTimeout = setTimeout(() => {
+      request.destroy();
+      finish(null);
+    }, options.timeoutMs || SOURCE_TIMEOUT_MS);
+    const request = https.request(
+      url,
+      {
+        method: options.method || 'GET',
+        timeout: options.timeoutMs || SOURCE_TIMEOUT_MS,
+        rejectUnauthorized: false,
+        headers: {
+          accept: options.accept || 'text/html,application/json',
+          'content-type': options.contentType || 'application/x-www-form-urlencoded',
+          'user-agent': 'USD-GHS-Market-Intelligence-Agent/0.3',
+          ...(options.headers || {})
+        }
+      },
+      (response) => {
+        let body = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => {
+          body += chunk;
+        });
+        response.on('end', () => {
+          finish(response.statusCode >= 200 && response.statusCode < 300 ? body : null);
+        });
+      }
+    );
+    request.on('timeout', () => {
+      request.destroy();
+      finish(null);
+    });
+    request.on('error', () => finish(null));
+    if (options.body) request.write(options.body);
+    request.end();
+  });
+}
+
 function numberOrNull(value) {
   const number = Number(String(value ?? '').replace(/,/g, '').trim());
   return Number.isFinite(number) && number > 0 ? number : null;
@@ -316,6 +364,25 @@ function average(numbers) {
   const valid = numbers.map(plausibleUsdGhsRate).filter(Boolean);
   if (!valid.length) return null;
   return Number((valid.reduce((total, value) => total + value, 0) / valid.length).toFixed(4));
+}
+
+function latestTimestamp(value) {
+  const time = new Date(value || 0).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function latestProviderRows(rows) {
+  const latest = new Map();
+  for (const row of rows) {
+    const name = row.company?.companyName || row.companyName || row.name || row.source || 'Unnamed provider';
+    const type = row.company?.subCategory?.name || row.type || 'Provider';
+    const key = `${name}::${type}::${row.baseCurrency || ''}::${row.quoteCurrency || ''}`;
+    const existing = latest.get(key);
+    const rowTime = latestTimestamp(row.lastUpdatedAt || row.updatedAt || row.date);
+    const existingTime = latestTimestamp(existing?.lastUpdatedAt || existing?.updatedAt || existing?.date);
+    if (!existing || rowTime >= existingTime) latest.set(key, row);
+  }
+  return [...latest.values()];
 }
 
 function jsonRowsFromAny(value) {
@@ -336,7 +403,7 @@ function summarizeCediRatesRows(rows, source) {
     return (base === 'USD' && quote === 'GHS') || pair === 'USDGHS' || pair === 'USD/GHS';
   });
 
-  const rowsToUse = usdRows.length ? usdRows : rows;
+  const rowsToUse = latestProviderRows(usdRows.length ? usdRows : rows);
   const mids = rowsToUse
     .map((row) => plausibleUsdGhsRate(row.mid || row.average || row.rate || row.value || row.price))
     .filter(Boolean);
@@ -358,17 +425,27 @@ function summarizeCediRatesRows(rows, source) {
     .sort()
     .at(-1);
   const contributors = rowsToUse
-    .map((row) => ({
-      name: row.company?.companyName || row.companyName || row.name || row.source || 'Unnamed provider',
-      type: row.company?.subCategory?.name || row.type || 'Provider',
-      buying: plausibleUsdGhsRate(row.buying || row.buy || row.bid),
-      selling: plausibleUsdGhsRate(row.selling || row.sell || row.ask),
-      midRate: plausibleUsdGhsRate(row.mid || row.average || row.rate || row.value || row.price),
-      lastUpdatedAt: row.lastUpdatedAt || row.updatedAt || row.date || null
-    }))
+    .map((row) => {
+      const buying = plausibleUsdGhsRate(row.buying || row.buy || row.bid);
+      const selling = plausibleUsdGhsRate(row.selling || row.sell || row.ask);
+      const suppliedMid = plausibleUsdGhsRate(row.mid || row.average || row.rate || row.value || row.price);
+      const computedMid = buying && selling ? Number(((buying + selling) / 2).toFixed(4)) : null;
+      const type = row.company?.subCategory?.name || row.type || 'Provider';
+      return {
+        name: row.company?.companyName || row.companyName || row.name || row.source || 'Unnamed provider',
+        type,
+        slug: row.company?.subCategory?.slug || '',
+        buying,
+        selling,
+        midRate: suppliedMid || computedMid || (/remittance/i.test(type) ? buying : null),
+        lastUpdatedAt: row.lastUpdatedAt || row.updatedAt || row.date || null,
+        source: 'CediRates',
+        sourceUrl: CEDIRATES_USD_GHS_URL
+      };
+    })
     .filter((row) => row.buying || row.selling || row.midRate)
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
-    .slice(0, 20);
+    .slice(0, 500);
 
   return {
     rate,
@@ -407,9 +484,9 @@ async function fetchCediRatesApiQuote() {
     apikey: config.cediRatesApiKey
   };
   const urls = [
-    'https://public-api.cedirates.com/api/v1/rates?baseCurrency=USD&quoteCurrency=GHS',
-    'https://public-api.cedirates.com/v1/rates?baseCurrency=USD&quoteCurrency=GHS',
-    'https://public-api.cedirates.com/rates?baseCurrency=USD&quoteCurrency=GHS'
+    'https://public-api.cedirates.com/api/v1/rates?baseCurrency=USD&quoteCurrency=GHS&limit=500',
+    'https://public-api.cedirates.com/v1/rates?baseCurrency=USD&quoteCurrency=GHS&limit=500',
+    'https://public-api.cedirates.com/rates?baseCurrency=USD&quoteCurrency=GHS&limit=500'
   ];
 
   for (const url of urls) {
@@ -472,7 +549,22 @@ function summarizeBogRows(rows) {
         rate,
         previousClose: rate,
         source: 'Bank of Ghana Daily Interbank FX Rates',
-        status: 'BoG Daily Rate'
+        status: 'BoG Daily Rate',
+        trusted: true,
+        contributors: [
+          {
+            name: 'Bank of Ghana',
+            type: 'Official',
+            slug: 'official',
+            buying: null,
+            selling: null,
+            midRate: rate,
+            lastUpdatedAt: new Date().toISOString(),
+            source: 'Bank of Ghana',
+            sourceUrl: BOG_DAILY_INTERBANK_URL
+          }
+        ],
+        providerRows: 1
       };
     }
   }
@@ -480,7 +572,9 @@ function summarizeBogRows(rows) {
 }
 
 async function fetchBogInterbankQuote() {
-  const html = await fetchTextUrl(BOG_DAILY_INTERBANK_URL, { timeoutMs: 12000 });
+  const html =
+    (await fetchTextUrl(BOG_DAILY_INTERBANK_URL, { timeoutMs: 12000 })) ||
+    (await fetchHttpsTextInsecure(BOG_DAILY_INTERBANK_URL, { timeoutMs: 12000 }));
   if (!html) return null;
 
   const nonceMatch = html.match(/name="wdtNonceFrontendServerSide_31" value="([^"]+)"/i);
@@ -496,7 +590,7 @@ async function fetchBogInterbankQuote() {
       'order[0][dir]': 'desc',
       wdtNonceFrontendServerSide_31: nonce
     }).toString();
-    const jsonText = await fetchTextUrl('https://www.bog.gov.gh/wp-admin/admin-ajax.php?action=get_wdtable&table_id=31', {
+    const ajaxOptions = {
       method: 'POST',
       accept: 'application/json',
       body,
@@ -505,7 +599,10 @@ async function fetchBogInterbankQuote() {
         'x-requested-with': 'XMLHttpRequest'
       },
       timeoutMs: 12000
-    });
+    };
+    const jsonText =
+      (await fetchTextUrl('https://www.bog.gov.gh/wp-admin/admin-ajax.php?action=get_wdtable&table_id=31', ajaxOptions)) ||
+      (await fetchHttpsTextInsecure('https://www.bog.gov.gh/wp-admin/admin-ajax.php?action=get_wdtable&table_id=31', ajaxOptions));
     if (jsonText) {
       try {
         const quote = summarizeBogRows(jsonRowsFromAny(JSON.parse(jsonText)));
@@ -525,9 +622,57 @@ async function fetchBogInterbankQuote() {
         rate,
         previousClose: rate,
         source: 'Bank of Ghana Daily Interbank FX Rates',
-        status: 'BoG Daily Rate'
+        status: 'BoG Page Scan',
+        trusted: false,
+        contributors: [
+          {
+            name: 'Bank of Ghana',
+            type: 'Official',
+            slug: 'official',
+            buying: null,
+            selling: null,
+            midRate: rate,
+            lastUpdatedAt: new Date().toISOString(),
+            source: 'Bank of Ghana',
+            sourceUrl: BOG_DAILY_INTERBANK_URL
+          }
+        ],
+        providerRows: 1
       }
     : null;
+}
+
+function combineQuoteSources(primary, official) {
+  if (!primary?.rate) return official;
+  if (!official?.rate) return primary;
+  const difference = Math.abs(official.rate - primary.rate) / primary.rate;
+  if (!official.trusted || difference > 0.08) {
+    return {
+      ...primary,
+      source: `${primary.source} (BoG scan available, not blended)`,
+      bogReference: {
+        rate: official.rate,
+        status: official.status,
+        source: official.source,
+        url: BOG_DAILY_INTERBANK_URL,
+        reason: !official.trusted ? 'BoG fallback parse was not structured table data' : 'BoG value was outside validation band'
+      }
+    };
+  }
+
+  const contributors = [...(primary.contributors || []), ...(official.contributors || [])];
+  const allMidRates = contributors.map((row) => row.midRate).filter(Boolean);
+  const combinedMid = average(allMidRates) || primary.rate;
+
+  return {
+    ...primary,
+    rate: combinedMid,
+    previousClose: combinedMid,
+    source: `${primary.source} + BoG Daily Interbank`,
+    status: 'Blended Live Sources',
+    providerRows: contributors.length,
+    contributors
+  };
 }
 
 async function fetchSource(source) {
@@ -577,20 +722,20 @@ async function fetchInterbankQuote() {
     return { ...apiQuote, status: 'Live API' };
   }
 
-  const cediRatesApiQuote = await fetchCediRatesApiQuote();
+  const [cediRatesApiQuote, bogQuote] = await Promise.all([
+    fetchCediRatesApiQuote(),
+    fetchBogInterbankQuote()
+  ]);
   if (cediRatesApiQuote?.rate) {
-    return cediRatesApiQuote;
-  }
-
-  const bogQuote = await fetchBogInterbankQuote();
-  if (bogQuote?.rate) {
-    return bogQuote;
+    return combineQuoteSources(cediRatesApiQuote, bogQuote);
   }
 
   const cediRatesPublicQuote = await fetchCediRatesPublicQuote();
   if (cediRatesPublicQuote?.rate) {
-    return cediRatesPublicQuote;
+    return combineQuoteSources(cediRatesPublicQuote, bogQuote);
   }
+
+  if (bogQuote?.rate) return bogQuote;
 
   const manualQuote = await readLatestManualQuote();
   if (manualQuote?.rate) {
@@ -661,6 +806,65 @@ function sourceMentions(source, terms) {
   return terms.some((term) => text.includes(term));
 }
 
+function evidenceForTitle(sources, title) {
+  const exact = sources
+    .filter((source) => (source.title || source.category) === title || source.category === title)
+    .flatMap((source) =>
+      (source.headlines || []).slice(0, 3).map((headline) => ({
+        source: source.category,
+        title: headline,
+        url: source.url,
+        status: source.status,
+        lastSeen: source.lastSeen,
+        impact: source.impact
+      }))
+    )
+    .slice(0, 8);
+  if (exact.length) return exact;
+
+  return sources
+    .filter((source) => source.title === title || source.category.includes(title.split(' ')[0]))
+    .flatMap((source) =>
+      (source.headlines || [`${source.category} scan completed; no direct headline match yet.`]).slice(0, 2).map((headline) => ({
+        source: source.category,
+        title: headline,
+        url: source.url,
+        status: source.status,
+        lastSeen: source.lastSeen,
+        impact: source.impact
+      }))
+    )
+    .slice(0, 4);
+}
+
+function evidenceByKeywords(sources, keywords) {
+  const matched = sources
+    .filter((source) => sourceMentions(source, keywords))
+    .flatMap((source) =>
+      (source.headlines || []).slice(0, 3).map((headline) => ({
+        source: source.category,
+        title: headline,
+        url: source.url,
+        status: source.status,
+        lastSeen: source.lastSeen,
+        impact: source.impact
+      }))
+    )
+    .slice(0, 8);
+  if (matched.length) return matched;
+
+  return sources.slice(0, 4).flatMap((source) =>
+    (source.headlines || [`${source.category} scan completed; no direct keyword match yet.`]).slice(0, 1).map((headline) => ({
+      source: source.category,
+      title: headline,
+      url: source.url,
+      status: source.status,
+      lastSeen: source.lastSeen,
+      impact: source.impact
+    }))
+  );
+}
+
 function buildSignals({ sources, quote }) {
   const grouped = new Map();
   for (const source of sources) {
@@ -720,7 +924,19 @@ function buildSignals({ sources, quote }) {
       value: value > 0 ? `+${value}` : `${value}`,
       description,
       impact: template.impact,
-      color: template.color
+      color: template.color,
+      evidence:
+        title === 'Interbank'
+          ? [
+              {
+                source: quote.source,
+                title: `${quote.status}: ${quote.rate}`,
+                url: quote.status === 'BoG Daily Rate' ? BOG_DAILY_INTERBANK_URL : CEDIRATES_USD_GHS_URL,
+                status: quote.status,
+                impact: 'Immediate market direction'
+              }
+            ]
+          : evidenceForTitle(sources, title)
     };
   });
 
@@ -776,6 +992,7 @@ function buildMarketState(quote, signals, history = []) {
     quoteProviderRows: quote.providerRows || null,
     quoteProviderLastUpdated: quote.providerLastUpdated || null,
     quoteContributors: quote.contributors || [],
+    bogReference: quote.bogReference || null,
     lastUpdated:
       new Date().toLocaleTimeString('en-GB', {
         hour: '2-digit',
@@ -1171,10 +1388,12 @@ function buildFallbackNotes({ marketState, signals, probability, forecast, regim
     .sort((a, b) => Number(b.value) - Number(a.value))
     .slice(0, 4)
     .map((signal) => `${signal.title}: ${signal.impact.toLowerCase()}`);
+  const commonSources = signals.flatMap((signal) => signal.evidence || []).slice(0, 10);
 
   return {
     morning: {
       title: 'USD/GHS Morning Brief',
+      availableAtHour: 7,
       time: `Generated ${marketState.lastUpdated}`,
       outlook: `${marketState.outlook} / ${marketState.cediView}`,
       summary: 'Supply is slightly ahead of demand after softer interbank quotes and supportive official-sector conditions.',
@@ -1184,10 +1403,12 @@ function buildFallbackNotes({ marketState, signals, probability, forecast, regim
         `Expected range: ${marketState.expectedRange}.`,
         `Highest probability: ${probability[0].label} at ${probability[0].value}%.`,
         ...topDrivers
-      ]
+      ],
+      sources: commonSources
     },
     midday: {
       title: 'USD/GHS Midday Update',
+      availableAtHour: 12,
       time: 'Generated 12:00 GMT',
       outlook: `${marketState.outlook} / ${marketState.cediView}`,
       summary: 'Midday conditions remain anchored by source health, interbank direction, and demand/supply balance.',
@@ -1196,10 +1417,12 @@ function buildFallbackNotes({ marketState, signals, probability, forecast, regim
         `Regime: ${regime.name}.`,
         `Dealer signal: ${dealerSignal.shortTermBias} with ${dealerSignal.conviction}/10 conviction.`,
         `Probability USD/GHS lower tomorrow: ${forecast.probabilityLower}%.`
-      ]
+      ],
+      sources: commonSources
     },
     close: {
       title: 'USD/GHS Close of Market Report',
+      availableAtHour: 17,
       time: 'Generated 17:00 GMT',
       outlook: `${marketState.outlook} / ${marketState.cediView}`,
       summary: 'Close report summarizes today’s drivers and prepares the next-day forecast.',
@@ -1208,10 +1431,12 @@ function buildFallbackNotes({ marketState, signals, probability, forecast, regim
         `Tomorrow's bias: ${forecast.outlook}.`,
         `Expected range tomorrow: ${forecast.expectedRange}.`,
         `Main risks: ${forecast.riskFactors.join('; ')}.`
-      ]
+      ],
+      sources: commonSources
     },
     afternoon: {
       title: 'USD/GHS Afternoon Watch',
+      availableAtHour: 14,
       time: 'Scheduled 14:30 GMT',
       outlook: forecast.direction,
       summary: `NEXT-DAY USD/GHS FORECAST: ${forecast.conclusion}`,
@@ -1223,10 +1448,12 @@ function buildFallbackNotes({ marketState, signals, probability, forecast, regim
         `Expected trading range: ${forecast.expectedRange}.`,
         `Key drivers: ${forecast.keyDrivers.join('; ')}.`,
         `Risk factors: ${forecast.riskFactors.join('; ')}.`
-      ]
+      ],
+      sources: commonSources
     },
     executive: {
       title: 'Executive Snapshot',
+      availableAtHour: 7,
       time: 'One-page version',
       outlook: 'Cedi-positive bias with global USD risk',
       summary: 'Designed for executives who need the call, the range, and the main risks in under a minute.',
@@ -1235,39 +1462,87 @@ function buildFallbackNotes({ marketState, signals, probability, forecast, regim
         'Upside risk comes from Fed repricing or concentrated importer demand.',
         'Downside risk comes from BoG supply, stronger gold, and cleaner market liquidity.',
         'Recommended action: stagger near-term USD purchases while quotes remain offered.'
-      ]
+      ],
+      sources: commonSources
     }
   };
 }
 
-function buildFlowReadings(signals) {
+function normalizeTimedNotes(notes, fallbackSources) {
+  const schedule = {
+    morning: { availableAtHour: 7, title: 'USD/GHS Morning Brief' },
+    midday: { availableAtHour: 12, title: 'USD/GHS Midday Update' },
+    afternoon: { availableAtHour: 14, title: 'USD/GHS Afternoon Watch' },
+    close: { availableAtHour: 17, title: 'USD/GHS Close of Market Report' },
+    executive: { availableAtHour: 7, title: 'Executive Snapshot' }
+  };
+
+  return Object.fromEntries(
+    Object.entries(notes).map(([key, note]) => [
+      key,
+      {
+        ...note,
+        title: note.title || schedule[key]?.title || key,
+        availableAtHour: note.availableAtHour ?? schedule[key]?.availableAtHour ?? 7,
+        sources: note.sources || fallbackSources
+      }
+    ])
+  );
+}
+
+function buildFlowReadings(signals, sources = [], marketState = {}) {
   const net = signals.reduce((total, signal) => total + Number(signal.value || 0), 0);
   return [
-    { label: 'Corporate USD bids', value: net > 20 ? 38 : 55, tone: net > 20 ? 'good' : 'watch' },
-    { label: 'Exporter supply', value: net > 20 ? 72 : 58, tone: 'good' },
-    { label: 'Bank liquidity stress', value: net > 20 ? 34 : 48, tone: net > 20 ? 'good' : 'watch' },
-    { label: 'Headline risk', value: 44, tone: 'watch' }
+    {
+      label: 'Corporate USD bids',
+      value: net > 20 ? 38 : 55,
+      tone: net > 20 ? 'good' : 'watch',
+      evidence: evidenceByKeywords(sources, ['demand', 'importer', 'forex', 'exchange rate']).concat([
+        { source: marketState.quoteSource, title: `USD/GHS quote status: ${marketState.quoteStatus}`, url: CEDIRATES_USD_GHS_URL }
+      ])
+    },
+    {
+      label: 'Exporter supply',
+      value: net > 20 ? 72 : 58,
+      tone: 'good',
+      evidence: evidenceByKeywords(sources, ['gold', 'cocoa', 'export', 'receipts'])
+    },
+    {
+      label: 'Bank liquidity stress',
+      value: net > 20 ? 34 : 48,
+      tone: net > 20 ? 'good' : 'watch',
+      evidence: evidenceByKeywords(sources, ['treasury bill', 'bond', 'auction', 'liquidity'])
+    },
+    {
+      label: 'Headline risk',
+      value: 44,
+      tone: 'watch',
+      evidence: evidenceByKeywords(sources, ['budget', 'fiscal', 'debt', 'political', 'cedi'])
+    }
   ];
 }
 
-function buildAlerts({ marketState, signals }) {
+function buildAlerts({ marketState, signals, sources }) {
   const fedSignal = signals.find((signal) => signal.title === 'Fed / US Data');
   const interbankSignal = signals.find((signal) => signal.title === 'Interbank');
   return [
     {
       title: 'Importer bid concentration',
       severity: marketState.demandPressure === 'High' ? 'Risk' : 'Watch',
-      detail: 'Energy, manufacturing, and corporate demand should be compared against afternoon quote depth.'
+      detail: 'Energy, manufacturing, and corporate demand should be compared against afternoon quote depth.',
+      evidence: evidenceByKeywords(sources, ['demand', 'importer', 'forex', 'exchange rate'])
     },
     {
       title: 'Global USD repricing',
       severity: Number(fedSignal?.value || 0) < -8 ? 'Risk' : 'Watch',
-      detail: 'Hot US CPI, NFP, or Fed repricing would weaken the cedi-positive setup.'
+      detail: 'Hot US CPI, NFP, or Fed repricing would weaken the cedi-positive setup.',
+      evidence: evidenceForTitle(sources, 'Fed / US Data')
     },
     {
       title: 'Interbank feed status',
       severity: marketState.quoteStatus === 'Fallback' ? 'Risk' : 'Support',
-      detail: `${interbankSignal?.status || 'Interbank'}: ${marketState.quoteSource}.`
+      detail: `${interbankSignal?.status || 'Interbank'}: ${marketState.quoteSource}.`,
+      evidence: interbankSignal?.evidence || []
     }
   ];
 }
@@ -1361,7 +1636,11 @@ async function buildIntelligence() {
   const manualActuals = await readForecastActuals();
   const accuracyTracker = buildAccuracyTracker(history, manualActuals);
   const aiNotes = await buildAiNotes({ marketState, signals, probability, sources: allSources, forecast, regime, dealerSignal });
-  const notes = aiNotes || buildFallbackNotes({ marketState, signals, probability, forecast, regime, dealerSignal });
+  const fallbackSources = signals.flatMap((signal) => signal.evidence || []).slice(0, 10);
+  const notes = normalizeTimedNotes(
+    aiNotes || buildFallbackNotes({ marketState, signals, probability, forecast, regime, dealerSignal }),
+    fallbackSources
+  );
 
   return {
     generatedAt: new Date().toISOString(),
@@ -1375,9 +1654,9 @@ async function buildIntelligence() {
     notes,
     events: buildEvents(),
     deliverables: buildDeliverables(),
-    alerts: buildAlerts({ marketState, signals }),
+    alerts: buildAlerts({ marketState, signals, sources: allSources }),
     sourceHealth: buildSourceHealth(allSources, quote),
-    flowReadings: buildFlowReadings(signals),
+    flowReadings: buildFlowReadings(signals, allSources, marketState),
     deliveryChannels: buildDeliveryChannels(),
     sourcePolicy: {
       reutersBloomberg:
