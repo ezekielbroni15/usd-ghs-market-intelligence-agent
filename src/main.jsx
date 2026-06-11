@@ -175,17 +175,49 @@ const forecast = {
   probabilityHigher: 42,
   probabilityLower: 58,
   confidence: 74,
+  predictedMidRate: 11.01,
   expectedRange: '10.88 - 11.12',
-  factors: [
-    { label: 'BoG FX Auctions', weight: 25, direction: 'Cedi Positive', score: 20 },
-    { label: 'Liquidity / T-Bills', weight: 15, direction: 'Cedi Positive', score: 15 },
-    { label: 'Gold Prices', weight: 10, direction: 'Cedi Positive', score: 8 },
-    { label: 'Fed & US Data', weight: 15, direction: 'USD Positive', score: -10 },
-    { label: 'Market Demand', weight: 10, direction: 'USD Positive', score: -12 }
+  tomorrowScenarios: [
+    { label: '10.96', description: 'Cedi-supportive continuation', probability: 58 },
+    { label: '11.01', description: 'Base-case midpoint', probability: 42 },
+    { label: '11.06', description: 'USD demand upside risk', probability: 42 }
   ],
+  factors: [
+    { label: 'BoG FX Auctions', weight: 25, direction: 'Cedi Positive', score: 20, evidence: [] },
+    { label: 'Liquidity / T-Bills', weight: 15, direction: 'Cedi Positive', score: 15, evidence: [] },
+    { label: 'Gold Prices', weight: 10, direction: 'Cedi Positive', score: 8, evidence: [] },
+    { label: 'Fed & US Data', weight: 15, direction: 'USD Positive', score: -10, evidence: [] },
+    { label: 'Market Demand', weight: 10, direction: 'USD Positive', score: -12, evidence: [] }
+  ],
+  marketMovingNews: [],
   keyDrivers: ['BoG supplied FX through auction', 'Treasury absorbed excess liquidity', 'Gold prices remain supportive'],
   riskFactors: ['Unexpected offshore demand', 'Stronger-than-expected US data'],
   conclusion: 'Current information favors modest cedi appreciation over the next trading session.'
+};
+
+const directionEngine = {
+  score: 3,
+  bias: 'Mild Cedi',
+  direction: 'USD/GHS likely lower today',
+  confidence: 78,
+  expectedRange: '12.24 - 12.29',
+  probabilityLower: 65,
+  probabilityHigher: 35,
+  tepScenarios: [
+    { label: '12.25', description: 'Softer USD / stronger cedi outcome', probability: 54 },
+    { label: '12.30', description: 'Range-bound TEP reference', probability: 31 },
+    { label: '12.35', description: 'Higher USD demand outcome', probability: 15 }
+  ],
+  topDrivers: [
+    { label: 'BoG FX auction / support', score: 3, reason: 'Detected cedi-supportive signal.', evidence: [] },
+    { label: 'Gold prices / exports', score: 2, reason: 'Detected cedi-supportive signal.', evidence: [] },
+    { label: 'Corporate USD demand', score: -3, reason: 'Watch importer and energy demand.', evidence: [] }
+  ],
+  dealerGuidance: [
+    'Be cautious chasing higher USD prices.',
+    'Lock in buyers early if quotes soften.',
+    'Expect softer PET/TEP quotes later if demand remains weak.'
+  ]
 };
 
 const regime = {
@@ -331,6 +363,7 @@ const fallbackIntelligence = {
   flowReadings,
   deliveryChannels,
   forecast,
+  directionEngine,
   regime,
   dealerSignal,
   accuracyTracker,
@@ -409,6 +442,7 @@ function QuoteTable({ market, onFilteredRateChange }) {
   const [mode, setMode] = useState('market');
   const [typeFilter, setTypeFilter] = useState(['All']);
   const [sourceFilter, setSourceFilter] = useState(['All']);
+  const [searchTerm, setSearchTerm] = useState('');
   const [page, setPage] = useState(1);
   const rows = mode === 'remittance'
     ? (market.quoteContributors || []).filter((row) => /remittance|money transfer/i.test(`${row.type} ${row.slug}`))
@@ -418,7 +452,10 @@ function QuoteTable({ market, onFilteredRateChange }) {
   const filteredRows = rows.filter((row) => {
     const typeOk = typeFilter.includes('All') || typeFilter.includes(row.type);
     const sourceOk = sourceFilter.includes('All') || sourceFilter.includes(row.source);
-    return typeOk && sourceOk;
+    const searchOk =
+      !searchTerm.trim() ||
+      `${row.name || ''} ${row.type || ''} ${row.source || ''}`.toLowerCase().includes(searchTerm.trim().toLowerCase());
+    return typeOk && sourceOk && searchOk;
   });
   const pageSize = 10;
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
@@ -438,12 +475,13 @@ function QuoteTable({ market, onFilteredRateChange }) {
       types: typeFilter,
       sources: sourceFilter
     });
-  }, [mode, calcMid, calcBuying, calcSelling, filteredRows.length, typeFilter.join('|'), sourceFilter.join('|')]);
+  }, [mode, calcMid, calcBuying, calcSelling, filteredRows.length, typeFilter.join('|'), sourceFilter.join('|'), searchTerm]);
 
   function updateMode(nextMode) {
     setMode(nextMode);
     setTypeFilter(['All']);
     setSourceFilter(['All']);
+    setSearchTerm('');
     setPage(1);
   }
 
@@ -511,6 +549,18 @@ function QuoteTable({ market, onFilteredRateChange }) {
         </div>
         <MultiSelectGroup label="Provider type" options={providerTypes} selected={typeFilter} onChange={(next) => { setTypeFilter(next); setPage(1); }} />
         <MultiSelectGroup label="Source" options={sources} selected={sourceFilter} onChange={(next) => { setSourceFilter(next); setPage(1); }} />
+        <label>
+          Provider search
+          <input
+            type="search"
+            value={searchTerm}
+            onChange={(event) => {
+              setSearchTerm(event.target.value);
+              setPage(1);
+            }}
+            placeholder="Bank of Ghana"
+          />
+        </label>
         <div className="quote-filter-count">
           <span>Rows</span>
           <strong>{filteredRows.length}</strong>
@@ -683,13 +733,17 @@ function SourceHealthTable({ sourceHealth, onInspect }) {
             onClick={() =>
               onInspect(
                 source.name,
-                (source.headlines || []).map((headline) => ({
-                  source: source.name,
-                  title: headline,
-                  url: source.url,
-                  status: source.status,
-                  impact: source.impact
-                }))
+                (source.articles?.length
+                  ? source.articles
+                  : (source.headlines || []).map((headline) => ({
+                      source: source.name,
+                      title: headline,
+                      snippet: headline,
+                      url: source.url,
+                      status: source.status,
+                      impact: source.impact
+                    }))
+                )
               )
             }
           >
@@ -803,7 +857,7 @@ function ConfigPanel({ intelligence }) {
   );
 }
 
-function ForecastPanel({ forecast }) {
+function ForecastPanel({ forecast, onInspect }) {
   return (
     <section className="forecast-panel">
       <div className="section-heading compact">
@@ -832,19 +886,119 @@ function ForecastPanel({ forecast }) {
         </div>
       </div>
       <div className="forecast-range">
+        <span>Predicted mid-rate</span>
+        <strong>{Number(forecast.predictedMidRate || 0).toFixed(4)}</strong>
+      </div>
+      <div className="forecast-range">
         <span>Expected trading range</span>
         <strong>{forecast.expectedRange}</strong>
       </div>
+      <div className="forecast-scenario-grid">
+        {(forecast.tomorrowScenarios || []).map((scenario) => (
+          <div key={`${scenario.label}-${scenario.description}`}>
+            <span>{scenario.description}</span>
+            <strong>{scenario.label}</strong>
+            <small>{scenario.probability}% probability</small>
+          </div>
+        ))}
+      </div>
+      <div className="forecast-news-list">
+        <h3>News that can affect tomorrow</h3>
+        {(forecast.marketMovingNews || []).slice(0, 5).map((item) => (
+          <button type="button" key={item.label} onClick={() => onInspect(item.label, item.evidence || [])}>
+            <span>{item.label}</span>
+            <strong className={item.score >= 0 ? 'positive-score' : 'negative-score'}>
+              {item.score >= 0 ? `+${item.score}` : item.score}
+            </strong>
+            <small>{item.reason}</small>
+          </button>
+        ))}
+        {(!forecast.marketMovingNews || forecast.marketMovingNews.length === 0) && (
+          <p>No article-backed forecast drivers were returned in this refresh.</p>
+        )}
+      </div>
       <div className="factor-list">
         {forecast.factors.map((factor) => (
-          <div className="factor-row" key={factor.label}>
+          <button className="factor-row" type="button" key={factor.label} onClick={() => onInspect(factor.label, factor.evidence || [])}>
             <span>{factor.label}</span>
             <small>{factor.weight}%</small>
             <strong className={factor.score >= 0 ? 'positive-score' : 'negative-score'}>
               {factor.score >= 0 ? `+${factor.score}` : factor.score}
             </strong>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function DirectionEnginePanel({ engine, onInspect }) {
+  const scoreClass = engine.score > 1 ? 'cedi' : engine.score < -1 ? 'usd' : 'neutral';
+  return (
+    <section className={`direction-panel ${scoreClass}`}>
+      <div className="section-heading compact">
+        <div>
+          <span>Same-day direction engine</span>
+          <h2>TEP Decision Board</h2>
+        </div>
+        <Target size={20} />
+      </div>
+      <div className="direction-hero">
+        <div>
+          <span>Cedi Score</span>
+          <strong>{engine.score > 0 ? `+${engine.score}` : engine.score}</strong>
+          <em>{engine.bias}</em>
+        </div>
+        <div>
+          <span>Market Bias</span>
+          <strong>{engine.direction}</strong>
+          <em>{engine.confidence}% confidence</em>
+        </div>
+        <div>
+          <span>Expected Daily Range</span>
+          <strong>{engine.expectedRange}</strong>
+          <em>{engine.probabilityLower}% lower / {engine.probabilityHigher}% higher</em>
+        </div>
+      </div>
+      <div className="tep-scenario-grid">
+        {(engine.tepScenarios || []).map((scenario) => (
+          <div key={scenario.label}>
+            <span>TEP {scenario.label}</span>
+            <strong>{scenario.probability}%</strong>
+            <small>{scenario.description}</small>
           </div>
         ))}
+      </div>
+      <div className="direction-columns">
+        <div>
+          <h3>Top Market Drivers</h3>
+          <div className="driver-stack">
+            {(engine.topDrivers || []).map((driver) => (
+              <button
+                type="button"
+                key={driver.label}
+                onClick={() => onInspect(driver.label, driver.evidence || [])}
+              >
+                <span>{driver.label}</span>
+                <strong className={driver.score >= 0 ? 'positive-score' : 'negative-score'}>
+                  {driver.score >= 0 ? `+${driver.score}` : driver.score}
+                </strong>
+                <small>{driver.reason}</small>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <h3>Dealer Guidance</h3>
+          <ul className="guidance-list">
+            {(engine.dealerGuidance || []).map((item) => (
+              <li key={item}>
+                <CheckCircle2 size={16} />
+                <span>{item}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
       </div>
     </section>
   );
@@ -982,11 +1136,12 @@ function EvidenceDrawer({ detail, onClose }) {
           {rows.map((item, index) => (
             <article key={`${item.source}-${index}`}>
               <strong>{item.source || 'Source'}</strong>
-              <p>{item.title || item.headline || 'No headline text available.'}</p>
+              <h3>{item.title || item.headline || 'No headline text available.'}</h3>
+              {item.snippet && <p>{item.snippet}</p>}
               <span>{item.status || item.impact || 'Live scan'}</span>
               {item.url && (
                 <a href={item.url} target="_blank" rel="noreferrer">
-                  Open source <ExternalLink size={14} />
+                  Open article/source <ExternalLink size={14} />
                 </a>
               )}
             </article>
@@ -1086,6 +1241,7 @@ function App() {
   const currentAlerts = intelligence.alerts;
   const currentSourceHealth = intelligence.sourceHealth;
   const currentFlowReadings = intelligence.flowReadings;
+  const currentDirectionEngine = intelligence.directionEngine;
   const currentForecast = intelligence.forecast;
   const currentRegime = intelligence.regime;
   const currentDealerSignal = intelligence.dealerSignal;
@@ -1226,6 +1382,8 @@ function App() {
 
       <QuoteTable market={currentMarket} onFilteredRateChange={setFilteredQuote} />
 
+      <DirectionEnginePanel engine={currentDirectionEngine} onInspect={inspectSources} />
+
       <section className="ops-grid">
         <SourceHealthTable sourceHealth={currentSourceHealth} onInspect={inspectSources} />
         <AlertsPanel alerts={currentAlerts} onInspect={inspectSources} />
@@ -1233,7 +1391,7 @@ function App() {
       </section>
 
       <section className="forecast-grid">
-        <ForecastPanel forecast={currentForecast} />
+        <ForecastPanel forecast={currentForecast} onInspect={inspectSources} />
         <RegimePanel regime={currentRegime} dealerSignal={currentDealerSignal} />
         <AccuracyPanel accuracyTracker={currentAccuracy} />
       </section>

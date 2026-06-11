@@ -20,6 +20,15 @@ const officialSources = [
     impact: 'Usually supports the cedi when BoG supplies USD or tightens liquidity'
   },
   {
+    id: 'bog-interbank',
+    category: 'BoG Daily Interbank',
+    title: 'Interbank',
+    url: BOG_DAILY_INTERBANK_URL,
+    cadence: 'Daily',
+    keywords: ['usd', 'ghs', 'interbank', 'buying', 'selling', 'mid'],
+    impact: 'Official daily reference for USD/GHS market direction'
+  },
+  {
     id: 'treasury',
     category: 'Treasury',
     title: 'Treasury',
@@ -56,6 +65,15 @@ const officialSources = [
     impact: 'CPI and NFP shift global USD strength'
   },
   {
+    id: 'dxy',
+    category: 'DXY',
+    title: 'Fed / US Data',
+    url: 'https://www.marketwatch.com/investing/index/dxy',
+    cadence: '30 min',
+    keywords: ['dxy', 'u.s. dollar index', 'dollar index', 'treasury yields', 'fed'],
+    impact: 'Global dollar strength can lift USD/GHS even when Ghana local flows are supportive'
+  },
+  {
     id: 'news-myjoy',
     category: 'Ghana News',
     title: 'News Sentiment',
@@ -72,6 +90,42 @@ const officialSources = [
     cadence: '10 min',
     keywords: ['cedi', 'forex', 'budget', 'fiscal', 'debt', 'treasury'],
     impact: 'Local market headlines influence sentiment'
+  },
+  {
+    id: 'news-gna',
+    category: 'Ghana News Agency',
+    title: 'News Sentiment',
+    url: 'https://gna.org.gh/category/business/',
+    cadence: '20 min',
+    keywords: ['cedi', 'treasury', 'gold', 'cocoa', 'trade surplus', 'inflation'],
+    impact: 'Official-style local reporting on fiscal, trade, and external flows'
+  },
+  {
+    id: 'news-newsghana',
+    category: 'NewsGhana',
+    title: 'News Sentiment',
+    url: 'https://newsghana.com.gh/business/',
+    cadence: '20 min',
+    keywords: ['cedi', 'gold exports', 'cocoa', 'imf', 'trade surplus', 'exchange rate'],
+    impact: 'Local business headlines can shift cedi sentiment'
+  },
+  {
+    id: 'news-ghanabusiness',
+    category: 'Ghana Business News',
+    title: 'News Sentiment',
+    url: 'https://www.ghanabusinessnews.com/',
+    cadence: '30 min',
+    keywords: ['cedi', 'gold', 'cocoa', 'treasury bills', 'eurobond', 'debt'],
+    impact: 'Business news on trade, debt, and export receipts supports the market read'
+  },
+  {
+    id: 'goldbod',
+    category: 'GoldBod',
+    title: 'Gold',
+    url: 'https://goldbod.gov.gh/',
+    cadence: '30 min',
+    keywords: ['gold', 'reserves', 'export', 'miners', 'foreign exchange'],
+    impact: 'Ghana gold purchase and export news supports reserve expectations'
   }
 ];
 
@@ -245,6 +299,22 @@ function stripHtml(html) {
     .trim();
 }
 
+function decodeHtml(text = '') {
+  return text
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/&#8217;/g, "'")
+    .replace(/&#8211;/g, '-')
+    .replace(/&#8212;/g, '-')
+    .replace(/&#038;/g, '&')
+    .replace(/&#(\d+);/g, (_, code) => {
+      const value = Number(code);
+      return Number.isFinite(value) ? String.fromCharCode(value) : ' ';
+    });
+}
+
 function findHeadlineSnippets(text, keywords) {
   const lower = text.toLowerCase();
   return keywords
@@ -257,6 +327,110 @@ function findHeadlineSnippets(text, keywords) {
     })
     .filter(Boolean)
     .slice(0, 4);
+}
+
+function absoluteUrl(href, baseUrl) {
+  if (!href || href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('tel:')) return null;
+  try {
+    return new URL(href, baseUrl).toString();
+  } catch (error) {
+    return null;
+  }
+}
+
+function extractTitleFromHtml(html, fallback = '') {
+  const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1];
+  const title = ogTitle || html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || fallback;
+  return stripHtml(decodeHtml(title)).slice(0, 180);
+}
+
+function extractPageLinks(html, baseUrl) {
+  const links = [];
+  const seen = new Set();
+  const anchorPattern = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  for (const match of html.matchAll(anchorPattern)) {
+    const url = absoluteUrl(match[1], baseUrl);
+    const title = stripHtml(decodeHtml(match[2]));
+    if (!url || !title || title.length < 18 || seen.has(url)) continue;
+    if (/\.(jpg|jpeg|png|gif|webp|svg|pdf|zip|mp4|mp3)$/i.test(url)) continue;
+    seen.add(url);
+    links.push({ title: title.slice(0, 180), url });
+  }
+  return links;
+}
+
+function scoreTextAgainstKeywords(text, keywords = []) {
+  const lower = text.toLowerCase();
+  return keywords.reduce((score, keyword) => {
+    const normalized = keyword.toLowerCase();
+    if (!normalized) return score;
+    return score + (lower.includes(normalized) ? Math.max(1, normalized.split(/\s+/).length) : 0);
+  }, 0);
+}
+
+async function fetchArticleEvidence(link, source) {
+  try {
+    const html = await fetchTextUrl(link.url, { timeoutMs: 6500 });
+    const text = stripHtml(html);
+    const snippets = findHeadlineSnippets(text, source.keywords);
+    const title = extractTitleFromHtml(html, link.title);
+    return {
+      source: source.category,
+      title: title || link.title,
+      snippet: snippets[0] || text.slice(0, 360),
+      url: link.url,
+      status: 'Article scan',
+      lastSeen: new Date().toISOString(),
+      impact: source.impact,
+      score: scoreTextAgainstKeywords(`${title} ${text.slice(0, 1200)}`, source.keywords)
+    };
+  } catch (error) {
+    return {
+      source: source.category,
+      title: link.title,
+      snippet: 'Article link discovered, but the article body could not be fetched during this scan.',
+      url: link.url,
+      status: 'Link discovered',
+      lastSeen: new Date().toISOString(),
+      impact: source.impact,
+      score: scoreTextAgainstKeywords(link.title, source.keywords)
+    };
+  }
+}
+
+async function buildSourceScanResult(source, html, startedAt, status = 'Online') {
+  const text = stripHtml(html);
+  const snippets = findHeadlineSnippets(text, source.keywords);
+  const articleLinks = extractPageLinks(html, source.url)
+    .map((link) => ({
+      ...link,
+      score: scoreTextAgainstKeywords(`${link.title} ${link.url}`, source.keywords)
+    }))
+    .filter((link) => link.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 4);
+  const articles = (await Promise.all(articleLinks.map((link) => fetchArticleEvidence(link, source))))
+    .filter((article) => article.score > 0 || article.status === 'Article scan')
+    .sort((a, b) => (b.score || 0) - (a.score || 0))
+    .slice(0, 4);
+  const articleHeadlines = articles.map((article) =>
+    article.snippet ? `${article.title}: ${article.snippet}` : article.title
+  );
+
+  return {
+    ...source,
+    online: true,
+    status,
+    lastSeen: new Date().toISOString(),
+    latencyMs: Date.now() - startedAt,
+    score: Math.max(70, 100 - Math.round((Date.now() - startedAt) / 250)),
+    headlines: articleHeadlines.length
+      ? articleHeadlines
+      : snippets.length
+        ? snippets
+        : [`Connected to ${source.category}; no priority keyword found in first page scan.`],
+    articles
+  };
 }
 
 async function fetchJsonUrl(url, parser) {
@@ -404,21 +578,6 @@ function summarizeCediRatesRows(rows, source) {
   });
 
   const rowsToUse = latestProviderRows(usdRows.length ? usdRows : rows);
-  const mids = rowsToUse
-    .map((row) => plausibleUsdGhsRate(row.mid || row.average || row.rate || row.value || row.price))
-    .filter(Boolean);
-  const buySellMids = rowsToUse
-    .map((row) => {
-      const buying = plausibleUsdGhsRate(row.buying || row.buy || row.bid);
-      const selling = plausibleUsdGhsRate(row.selling || row.sell || row.ask);
-      return buying && selling ? Number(((buying + selling) / 2).toFixed(4)) : null;
-    })
-    .filter(Boolean);
-  const rate = average([...mids, ...buySellMids]);
-  if (!rate) return null;
-
-  const buying = average(rowsToUse.map((row) => row.buying || row.buy || row.bid));
-  const selling = average(rowsToUse.map((row) => row.selling || row.sell || row.ask));
   const latestUpdate = rowsToUse
     .map((row) => row.lastUpdatedAt || row.updatedAt || row.date)
     .filter(Boolean)
@@ -446,6 +605,10 @@ function summarizeCediRatesRows(rows, source) {
     .filter((row) => row.buying || row.selling || row.midRate)
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
     .slice(0, 500);
+  const rate = average(contributors.map((row) => row.midRate));
+  if (!rate) return null;
+  const buying = average(contributors.map((row) => row.buying));
+  const selling = average(contributors.map((row) => row.selling));
 
   return {
     rate,
@@ -645,11 +808,26 @@ async function fetchBogInterbankQuote() {
 function combineQuoteSources(primary, official) {
   if (!primary?.rate) return official;
   if (!official?.rate) return primary;
+  const officialContributors = official.contributors || [
+    {
+      name: 'Bank of Ghana',
+      type: 'Official',
+      slug: 'official',
+      buying: null,
+      selling: null,
+      midRate: official.rate,
+      lastUpdatedAt: new Date().toISOString(),
+      source: 'Bank of Ghana',
+      sourceUrl: BOG_DAILY_INTERBANK_URL
+    }
+  ];
   const difference = Math.abs(official.rate - primary.rate) / primary.rate;
   if (!official.trusted || difference > 0.08) {
     return {
       ...primary,
       source: `${primary.source} (BoG scan available, not blended)`,
+      contributors: primary.contributors || [],
+      providerRows: primary.providerRows || (primary.contributors || []).length,
       bogReference: {
         rate: official.rate,
         status: official.status,
@@ -660,7 +838,7 @@ function combineQuoteSources(primary, official) {
     };
   }
 
-  const contributors = [...(primary.contributors || []), ...(official.contributors || [])];
+  const contributors = [...(primary.contributors || []), ...officialContributors];
   const allMidRates = contributors.map((row) => row.midRate).filter(Boolean);
   const combinedMid = average(allMidRates) || primary.rate;
 
@@ -687,19 +865,15 @@ async function fetchSource(source) {
       }
     });
     const html = await response.text();
-    const text = stripHtml(html);
-    const snippets = findHeadlineSnippets(text, source.keywords);
-
-    return {
-      ...source,
-      online: response.ok,
-      status: response.ok ? 'Online' : `HTTP ${response.status}`,
-      lastSeen: new Date().toISOString(),
-      latencyMs: Date.now() - startedAt,
-      score: response.ok ? Math.max(70, 100 - Math.round((Date.now() - startedAt) / 250)) : 58,
-      headlines: snippets.length ? snippets : [`Connected to ${source.category}; no priority keyword found in first page scan.`]
-    };
+    return buildSourceScanResult(source, html, startedAt, response.ok ? 'Online' : `HTTP ${response.status}`);
   } catch (error) {
+    if (/bog\.gov\.gh/i.test(source.url)) {
+      const html = await fetchHttpsTextInsecure(source.url, { timeoutMs: SOURCE_TIMEOUT_MS });
+      if (html) {
+        return buildSourceScanResult(source, html, startedAt, 'Online');
+      }
+    }
+
     return {
       ...source,
       online: false,
@@ -708,6 +882,7 @@ async function fetchSource(source) {
       latencyMs: Date.now() - startedAt,
       score: 52,
       headlines: [`Live fetch unavailable for ${source.category}; using cached analyst assumptions.`],
+      articles: [],
       error: error.name === 'AbortError' ? 'Timed out' : error.message
     };
   } finally {
@@ -735,7 +910,7 @@ async function fetchInterbankQuote() {
     return combineQuoteSources(cediRatesPublicQuote, bogQuote);
   }
 
-  if (bogQuote?.rate) return bogQuote;
+  if (bogQuote?.rate && bogQuote.trusted) return bogQuote;
 
   const manualQuote = await readLatestManualQuote();
   if (manualQuote?.rate) {
@@ -790,6 +965,15 @@ async function fetchLicensedNews() {
           score: 88,
           lastSeen: new Date().toISOString(),
           headlines: findHeadlineSnippets(content, ['ghana', 'cedi', 'imf', 'cocoa', 'gold']).slice(0, 3),
+          articles: findHeadlineSnippets(content, ['ghana', 'cedi', 'imf', 'cocoa', 'gold']).slice(0, 3).map((snippet, index) => ({
+            source: file.includes('bloomberg') ? 'Bloomberg' : file.includes('reuters') ? 'Reuters' : 'Licensed News',
+            title: `${file} evidence ${index + 1}`,
+            snippet,
+            url: `file://${file}`,
+            status: 'Imported',
+            lastSeen: new Date().toISOString(),
+            impact: 'Licensed news import affects sentiment'
+          })),
           impact: 'Licensed news import affects sentiment'
         };
       })
@@ -802,67 +986,69 @@ async function fetchLicensedNews() {
 }
 
 function sourceMentions(source, terms) {
-  const text = source.headlines.join(' ').toLowerCase();
+  const text = [
+    ...(source.headlines || []),
+    ...((source.articles || []).flatMap((article) => [article.title, article.snippet]))
+  ]
+    .join(' ')
+    .toLowerCase();
   return terms.some((term) => text.includes(term));
+}
+
+function evidenceRowsForSource(source, fallbackLimit = 3) {
+  const articleRows = (source.articles || []).slice(0, fallbackLimit).map((article) => ({
+    source: article.source || source.category,
+    title: article.title,
+    snippet: article.snippet,
+    url: article.url || source.url,
+    status: article.status || source.status,
+    lastSeen: article.lastSeen || source.lastSeen,
+    impact: article.impact || source.impact
+  }));
+  if (articleRows.length) return articleRows;
+
+  return (source.headlines || [`${source.category} scan completed; no direct headline match yet.`])
+    .slice(0, fallbackLimit)
+    .map((headline) => ({
+      source: source.category,
+      title: headline,
+      snippet: headline,
+      url: source.url,
+      status: source.status,
+      lastSeen: source.lastSeen,
+      impact: source.impact
+    }));
 }
 
 function evidenceForTitle(sources, title) {
   const exact = sources
     .filter((source) => (source.title || source.category) === title || source.category === title)
-    .flatMap((source) =>
-      (source.headlines || []).slice(0, 3).map((headline) => ({
-        source: source.category,
-        title: headline,
-        url: source.url,
-        status: source.status,
-        lastSeen: source.lastSeen,
-        impact: source.impact
-      }))
-    )
+    .flatMap((source) => evidenceRowsForSource(source, 3))
     .slice(0, 8);
   if (exact.length) return exact;
 
   return sources
     .filter((source) => source.title === title || source.category.includes(title.split(' ')[0]))
-    .flatMap((source) =>
-      (source.headlines || [`${source.category} scan completed; no direct headline match yet.`]).slice(0, 2).map((headline) => ({
-        source: source.category,
-        title: headline,
-        url: source.url,
-        status: source.status,
-        lastSeen: source.lastSeen,
-        impact: source.impact
-      }))
-    )
+    .flatMap((source) => evidenceRowsForSource(source, 2))
     .slice(0, 4);
 }
 
 function evidenceByKeywords(sources, keywords) {
   const matched = sources
     .filter((source) => sourceMentions(source, keywords))
-    .flatMap((source) =>
-      (source.headlines || []).slice(0, 3).map((headline) => ({
-        source: source.category,
-        title: headline,
-        url: source.url,
-        status: source.status,
-        lastSeen: source.lastSeen,
-        impact: source.impact
-      }))
-    )
+    .flatMap((source) => evidenceRowsForSource(source, 3))
     .slice(0, 8);
   if (matched.length) return matched;
 
-  return sources.slice(0, 4).flatMap((source) =>
-    (source.headlines || [`${source.category} scan completed; no direct keyword match yet.`]).slice(0, 1).map((headline) => ({
-      source: source.category,
-      title: headline,
-      url: source.url,
-      status: source.status,
-      lastSeen: source.lastSeen,
-      impact: source.impact
-    }))
-  );
+  return sources.slice(0, 4).flatMap((source) => evidenceRowsForSource(source, 1));
+}
+
+function exactEvidenceByKeywords(sources, keywords) {
+  return sources
+    .filter((source) => sourceMentions(source, keywords))
+    .flatMap((source) => evidenceRowsForSource(source, 3))
+    .filter((row) => scoreTextAgainstKeywords(`${row.title || ''} ${row.snippet || ''}`, keywords) > 0)
+    .slice(0, 8);
 }
 
 function buildSignals({ sources, quote }) {
@@ -1015,6 +1201,183 @@ function buildProbabilities(signals) {
   ];
 }
 
+const directionDriverRules = [
+  {
+    key: 'bog',
+    label: 'BoG FX auction / support',
+    weight: 3,
+    positive: ['fx auction', 'foreign exchange', 'spot intervention', 'mops up', 'liquidity', 'support'],
+    negative: ['oversubscribed', 'pressure', 'shortage', 'volatility'],
+    fallback: 1
+  },
+  {
+    key: 'gold',
+    label: 'Gold prices / exports',
+    weight: 2,
+    positive: ['gold exports', 'gold price', 'goldbod', 'reserves', 'trade surplus'],
+    negative: ['gold falls', 'lower gold', 'smuggling', 'hoarding'],
+    fallback: 1
+  },
+  {
+    key: 'cocoa',
+    label: 'Cocoa receipts',
+    weight: 2,
+    positive: ['cocoa receipts', 'cocoa exports', 'cocoa earnings', 'cocobod', 'export receipts'],
+    negative: ['cocoa financing', 'lower cocoa', 'payment pressure'],
+    fallback: 0
+  },
+  {
+    key: 'corporateDemand',
+    label: 'Corporate USD demand',
+    weight: 3,
+    positive: ['no major importer demand', 'moderate demand', 'exporter supply'],
+    negative: ['import demand', 'energy payments', 'omc', 'corporate demand', 'offshore demand', 'dividend repatriation'],
+    fallback: 1,
+    inverse: true
+  },
+  {
+    key: 'imf',
+    label: 'IMF program',
+    weight: 1,
+    positive: ['imf', 'review', 'disbursement', 'staff-level agreement', 'program'],
+    negative: ['delay', 'missed target', 'program risk'],
+    fallback: 0
+  },
+  {
+    key: 'eurobond',
+    label: 'Eurobond / debt tone',
+    weight: 1,
+    positive: ['eurobond', 'debt exchange', 'debt service', 'market access'],
+    negative: ['debt pressure', 'default', 'arrears'],
+    fallback: 0
+  },
+  {
+    key: 'treasury',
+    label: 'Treasury bills / liquidity',
+    weight: 1,
+    positive: ['treasury bill', 't-bill', 'oversubscribed', 'mops up', 'absorbs', 'liquidity'],
+    negative: ['misses target', 'undersubscribed', 'liquidity stress'],
+    fallback: 0
+  },
+  {
+    key: 'inflation',
+    label: 'Inflation releases',
+    weight: 1,
+    positive: ['inflation falls', 'disinflation', 'lower inflation'],
+    negative: ['inflation rises', 'higher inflation', 'inflation pressure'],
+    fallback: 0
+  },
+  {
+    key: 'dxy',
+    label: 'Global dollar / DXY',
+    weight: 1,
+    positive: ['dxy falls', 'dollar weakens', 'fed cut'],
+    negative: ['dxy strong', 'dollar strengthens', 'hawkish fed', 'higher treasury yields', 'fomc'],
+    fallback: 0,
+    inverse: true
+  }
+];
+
+function scoreDirectionRule(rule, sources) {
+  const positiveEvidence = exactEvidenceByKeywords(sources, rule.positive);
+  const negativeEvidence = exactEvidenceByKeywords(sources, rule.negative);
+  const positiveHit = positiveEvidence.length > 0;
+  const negativeHit = negativeEvidence.length > 0;
+
+  let score = rule.fallback || 0;
+  let evidence = evidenceByKeywords(sources, [...rule.positive, ...rule.negative]).slice(0, 2);
+  let reason = 'No strong fresh article signal; using neutral/default desk assumption.';
+
+  if (positiveHit && !negativeHit) {
+    score = rule.weight;
+    evidence = positiveEvidence;
+    reason = rule.inverse ? 'Detected softer USD-demand pressure.' : 'Detected cedi-supportive signal.';
+  } else if (negativeHit && !positiveHit) {
+    score = -rule.weight;
+    evidence = negativeEvidence;
+    reason = rule.inverse ? 'Detected USD-positive demand/global dollar pressure.' : 'Detected cedi-negative risk.';
+  } else if (positiveHit && negativeHit) {
+    score = 0;
+    evidence = [...positiveEvidence.slice(0, 2), ...negativeEvidence.slice(0, 2)];
+    reason = 'Mixed evidence detected, so the score is neutralized.';
+  }
+
+  return {
+    key: rule.key,
+    label: rule.label,
+    maxScore: rule.weight,
+    score,
+    reason,
+    evidence: evidence.slice(0, 4)
+  };
+}
+
+function cediScoreView(score) {
+  if (score >= 5) return 'Strong Cedi';
+  if (score >= 2) return 'Mild Cedi';
+  if (score >= -1) return 'Neutral';
+  if (score >= -4) return 'Mild USD';
+  return 'Strong USD';
+}
+
+function buildDirectionEngine({ marketState, sources }) {
+  const drivers = directionDriverRules.map((rule) => scoreDirectionRule(rule, sources));
+  const totalScore = clamp(drivers.reduce((total, driver) => total + driver.score, 0), -10, 10);
+  const bias = cediScoreView(totalScore);
+  const cediPositive = totalScore > 1;
+  const usdPositive = totalScore < -1;
+  const currentRate = marketState.interbankRate;
+  const rangeCenter = currentRate + (cediPositive ? -0.035 : usdPositive ? 0.04 : 0);
+  const rangeWidth = totalScore === 0 ? 0.035 : 0.045;
+  const expectedRange = `${Math.max(0, rangeCenter - rangeWidth).toFixed(2)} - ${(rangeCenter + rangeWidth).toFixed(2)}`;
+  const lowerProbability = clamp(50 + totalScore * 5, 15, 85);
+  const higherProbability = 100 - lowerProbability;
+  const probability1225 = clamp(totalScore >= 2 ? 40 + totalScore * 5 : 22 + totalScore * 3, 8, 78);
+  const probability1235 = clamp(totalScore <= -2 ? 40 + Math.abs(totalScore) * 5 : 22 - totalScore * 2, 8, 78);
+  const probability1230 = clamp(100 - probability1225 - probability1235, 12, 62);
+  const confidence = clamp(58 + Math.abs(totalScore) * 4 + drivers.filter((driver) => driver.evidence?.length).length * 2, 55, 88);
+  const topDrivers = [...drivers]
+    .filter((driver) => driver.score !== 0)
+    .sort((a, b) => Math.abs(b.score) - Math.abs(a.score))
+    .slice(0, 5);
+
+  return {
+    score: totalScore,
+    bias,
+    direction: cediPositive ? 'USD/GHS likely lower today' : usdPositive ? 'USD/GHS likely higher today' : 'USD/GHS likely range-bound today',
+    confidence,
+    expectedRange,
+    probabilityLower: lowerProbability,
+    probabilityHigher: higherProbability,
+    tepScenarios: [
+      { label: '12.25', description: 'Softer USD / stronger cedi outcome', probability: probability1225 },
+      { label: '12.30', description: 'Range-bound TEP reference', probability: probability1230 },
+      { label: '12.35', description: 'Higher USD demand outcome', probability: probability1235 }
+    ],
+    topDrivers: topDrivers.length ? topDrivers : drivers.slice(0, 5),
+    dealerGuidance: cediPositive
+      ? [
+          'Be cautious chasing higher USD prices.',
+          'Lock in buyers early if quotes soften.',
+          'Expect softer PET/TEP quotes later if demand remains weak.'
+        ]
+      : usdPositive
+        ? [
+            'Secure TEP buyers quickly.',
+            'Avoid waiting too long to cover Flex requests.',
+            'Higher USD rates are more likely if demand remains concentrated.'
+          ]
+        : [
+            'Treat 12.30-style quotes as fair until a fresh driver breaks the range.',
+            'Stagger execution and watch importer demand after midday.',
+            'Refresh the evidence board before covering large tickets.'
+          ],
+    explanation: topDrivers
+      .map((driver) => `${driver.label}: ${driver.score > 0 ? '+' : ''}${driver.score}`)
+      .join('; ')
+  };
+}
+
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
@@ -1039,16 +1402,70 @@ function scoreToDirection(score) {
   return 'USD/GHS Expected to Trade Range-Bound';
 }
 
-function buildForecast({ marketState, signals }) {
+const forecastEvidenceKeywords = {
+  bogAuctions: ['fx auction', 'foreign exchange', 'spot intervention', 'bog', 'mops up', 'liquidity'],
+  liquidity: ['treasury bill', 't-bill', 'auction', 'bond', 'liquidity', 'mops up', 'absorbs'],
+  imf: ['imf', 'review', 'disbursement', 'staff-level agreement', 'program'],
+  gold: ['gold', 'gold exports', 'gold price', 'goldbod', 'reserves', 'trade surplus'],
+  cocoa: ['cocoa', 'cocoa exports', 'cocoa receipts', 'cocobod', 'export earnings'],
+  fed: ['fed', 'fomc', 'cpi', 'nfp', 'payroll', 'inflation', 'dxy', 'dollar index'],
+  marketDemand: ['demand', 'importer', 'corporate demand', 'energy payments', 'omc', 'offshore demand'],
+  news: ['cedi', 'fiscal', 'budget', 'debt', 'eurobond', 'political', 'exchange rate']
+};
+
+const forecastSourceCategories = {
+  bogAuctions: ['Bank of Ghana', 'BoG Daily Interbank'],
+  liquidity: ['Treasury', 'Ghana News', 'Ghana News Agency', 'NewsGhana', 'Ghana Business News'],
+  imf: ['IMF', 'Ghana News', 'Ghana News Agency', 'NewsGhana', 'Ghana Business News'],
+  gold: ['Gold', 'GoldBod', 'Ghana News', 'Ghana News Agency', 'NewsGhana', 'Ghana Business News'],
+  cocoa: ['Cocoa', 'Ghana News', 'Ghana News Agency', 'NewsGhana', 'Ghana Business News'],
+  fed: ['Fed / US Data', 'US CPI / NFP', 'DXY'],
+  marketDemand: ['Ghana News', 'Ghana News Agency', 'NewsGhana', 'Ghana Business News', 'Reuters', 'Bloomberg'],
+  news: ['Ghana News', 'Ghana News Agency', 'NewsGhana', 'Ghana Business News', 'Reuters', 'Bloomberg']
+};
+
+function sourceMatchesForecastDriver(source, driver) {
+  const allowed = forecastSourceCategories[driver.key];
+  if (!allowed) return true;
+  const label = `${source.category || ''} ${source.title || ''}`;
+  return allowed.some((category) => label.includes(category));
+}
+
+function forecastEvidenceForDriver(driver, sources, signals) {
+  const keywords = forecastEvidenceKeywords[driver.key] || [driver.label];
+  const relevantSources = sources.filter((source) => sourceMatchesForecastDriver(source, driver));
+  const exactRows = exactEvidenceByKeywords(relevantSources, keywords);
+  if (exactRows.length) return exactRows.slice(0, 4);
+
+  const signalEvidence = signals.find((signal) => signal.title === driver.signalTitle)?.evidence || [];
+  if (signalEvidence.length) return signalEvidence.slice(0, 4);
+
+  return evidenceForTitle(relevantSources.length ? relevantSources : sources, driver.signalTitle).slice(0, 3);
+}
+
+function isActionableEvidence(row) {
+  const text = `${row.title || ''} ${row.snippet || ''}`.toLowerCase();
+  return Boolean(row.url) && !/live fetch unavailable|no direct keyword match|no priority keyword/.test(text);
+}
+
+function buildForecast({ marketState, signals, sources = [] }) {
   const signalMap = new Map(signals.map((signal) => [signal.title, Number(signal.value || 0)]));
   const factors = forecastDrivers.map((driver) => {
     const rawSignal = signalMap.get(driver.signalTitle) || 0;
     const signedSignal = driver.direction === 'USD Positive' ? -Math.abs(rawSignal) : rawSignal;
     const score = clamp(Math.round((signedSignal / 25) * driver.weight), -driver.weight, driver.weight);
+    const evidence = forecastEvidenceForDriver(driver, sources, signals);
     return {
       ...driver,
       rawSignal,
-      score
+      score,
+      evidence,
+      reason:
+        score > 0
+          ? `${driver.label} is adding cedi-supportive weight for tomorrow.`
+          : score < 0
+            ? `${driver.label} is adding USD-supportive risk for tomorrow.`
+            : `${driver.label} is not creating a strong directional signal yet.`
     };
   });
 
@@ -1063,6 +1480,7 @@ function buildForecast({ marketState, signals }) {
   const center = marketState.interbankRate + (totalScore >= 15 ? -0.03 : totalScore <= -15 ? 0.04 : 0);
   const lower = Math.max(0, center - 0.07).toFixed(2);
   const upper = (center + 0.07).toFixed(2);
+  const predictedMidRate = Number(center.toFixed(4));
   const positiveDrivers = factors
     .filter((factor) => factor.score > 0)
     .sort((a, b) => b.score - a.score)
@@ -1073,6 +1491,33 @@ function buildForecast({ marketState, signals }) {
     .sort((a, b) => a.score - b.score)
     .slice(0, 4)
     .map((factor) => `${factor.label}: ${factor.score}`);
+  const marketMovingNews = factors
+    .filter((factor) => factor.evidence?.some(isActionableEvidence))
+    .sort((a, b) => Math.abs(b.score) - Math.abs(a.score))
+    .slice(0, 6)
+    .map((factor) => ({
+      label: factor.label,
+      score: factor.score,
+      reason: factor.reason,
+      evidence: factor.evidence.filter(isActionableEvidence)
+    }));
+  const tomorrowScenarios = [
+    {
+      label: (predictedMidRate - 0.05).toFixed(2),
+      description: 'Cedi-supportive continuation',
+      probability: probabilityLower
+    },
+    {
+      label: predictedMidRate.toFixed(2),
+      description: 'Base-case midpoint',
+      probability: clamp(100 - Math.abs(probabilityLower - probabilityHigher), 18, 55)
+    },
+    {
+      label: (predictedMidRate + 0.05).toFixed(2),
+      description: 'USD demand upside risk',
+      probability: probabilityHigher
+    }
+  ];
 
   return {
     forecastDate: tomorrowIsoDate(),
@@ -1082,8 +1527,11 @@ function buildForecast({ marketState, signals }) {
     probabilityHigher,
     probabilityLower,
     confidence,
+    predictedMidRate,
     expectedRange: `${lower} - ${upper}`,
+    tomorrowScenarios,
     factors,
+    marketMovingNews,
     keyDrivers: positiveDrivers.length
       ? positiveDrivers
       : ['No single cedi-positive driver is dominant today.'],
@@ -1559,6 +2007,7 @@ function buildSourceHealth(sources, quote) {
     status: source.status,
     score: source.score,
     headlines: source.headlines,
+    articles: source.articles || [],
     url: source.url,
     impact: source.impact
   }));
@@ -1630,7 +2079,8 @@ async function buildIntelligence() {
   const history = await readArchiveHistory(120);
   const marketState = buildMarketState(quote, signals, history);
   const probability = buildProbabilities(signals);
-  const forecast = buildForecast({ marketState, signals });
+  const forecast = buildForecast({ marketState, signals, sources: allSources });
+  const directionEngine = buildDirectionEngine({ marketState, sources: allSources });
   const regime = buildRegime({ signals, forecast });
   const dealerSignal = buildDealerSignal({ forecast, marketState });
   const manualActuals = await readForecastActuals();
@@ -1647,6 +2097,7 @@ async function buildIntelligence() {
     marketState,
     signals,
     probability,
+    directionEngine,
     forecast,
     regime,
     dealerSignal,

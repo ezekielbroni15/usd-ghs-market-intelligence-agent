@@ -127,6 +127,7 @@ button {
 .flow-panel,
 .delivery-panel,
 .config-panel,
+.direction-panel,
 .forecast-panel,
 .regime-panel,
 .accuracy-panel,
@@ -406,7 +407,7 @@ button {
 
 .quote-controls {
   display: grid;
-  grid-template-columns: minmax(220px, 260px) minmax(220px, 1fr) minmax(180px, 260px) 86px 118px;
+  grid-template-columns: minmax(180px, 220px) minmax(200px, 1fr) minmax(170px, 240px) minmax(170px, 240px) 74px 118px;
   gap: 12px;
   align-items: end;
   margin-bottom: 14px;
@@ -465,7 +466,8 @@ button {
   font-weight: 800;
 }
 
-.quote-controls select {
+.quote-controls select,
+.quote-controls input {
   min-height: 42px;
   border: 1px solid #dce7e4;
   border-radius: 8px;
@@ -726,12 +728,173 @@ button {
 .flow-panel,
 .delivery-panel,
 .config-panel,
+.direction-panel,
 .forecast-panel,
 .regime-panel,
 .accuracy-panel,
 .deliverables-panel,
 .export-panel {
   padding: 20px;
+}
+
+.direction-panel {
+  margin-bottom: 18px;
+}
+
+.direction-panel.cedi {
+  border-color: rgba(12, 122, 99, 0.22);
+}
+
+.direction-panel.usd {
+  border-color: rgba(178, 74, 60, 0.22);
+}
+
+.direction-hero {
+  display: grid;
+  grid-template-columns: 0.75fr 1.25fr 1fr;
+  gap: 12px;
+}
+
+.direction-hero div,
+.tep-scenario-grid div {
+  border-radius: 8px;
+  background: #f6f9f8;
+  padding: 14px;
+}
+
+.direction-hero div:first-child {
+  background: #102a2a;
+  color: #f8d98d;
+}
+
+.direction-hero span,
+.direction-hero em,
+.tep-scenario-grid span,
+.tep-scenario-grid small,
+.driver-stack small,
+.guidance-list span {
+  display: block;
+}
+
+.direction-hero span,
+.tep-scenario-grid span,
+.driver-stack small {
+  color: #66716e;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.direction-hero div:first-child span,
+.direction-hero div:first-child em {
+  color: rgba(248, 217, 141, 0.78);
+}
+
+.direction-hero strong {
+  display: block;
+  margin: 6px 0 4px;
+  font-size: 1.25rem;
+  line-height: 1.1;
+}
+
+.direction-hero div:first-child strong {
+  font-size: 2.6rem;
+}
+
+.direction-hero em {
+  color: #5d6b68;
+  font-size: 0.82rem;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.tep-scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.tep-scenario-grid strong {
+  display: block;
+  margin: 6px 0 4px;
+  font-size: 1.55rem;
+}
+
+.tep-scenario-grid small {
+  color: #5d6b68;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.direction-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.direction-columns h3 {
+  margin: 0 0 10px;
+  font-size: 0.94rem;
+}
+
+.driver-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.driver-stack button {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 10px;
+  min-height: 54px;
+  border-radius: 8px;
+  background: #ffffff;
+  border: 1px solid #edf1f0;
+  color: #18201f;
+  padding: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.driver-stack button span {
+  font-size: 0.88rem;
+  font-weight: 900;
+}
+
+.driver-stack button small {
+  grid-column: 1 / -1;
+  line-height: 1.35;
+}
+
+.guidance-list {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.guidance-list li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 8px;
+  border-radius: 8px;
+  background: #edf8f4;
+  padding: 10px;
+}
+
+.guidance-list svg {
+  color: #0c7a63;
+  margin-top: 1px;
+}
+
+.guidance-list span {
+  color: #30403d;
+  font-size: 0.86rem;
+  line-height: 1.35;
+  font-weight: 800;
 }
 
 .forecast-grid {
@@ -797,6 +960,73 @@ button {
   margin-top: 10px;
 }
 
+.forecast-scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.forecast-scenario-grid div {
+  border-radius: 8px;
+  background: #f6f9f8;
+  padding: 12px;
+}
+
+.forecast-scenario-grid span,
+.forecast-scenario-grid small,
+.forecast-news-list small {
+  display: block;
+  color: #66716e;
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.forecast-scenario-grid strong {
+  display: block;
+  margin: 5px 0;
+  font-size: 1.2rem;
+}
+
+.forecast-news-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.forecast-news-list h3 {
+  margin: 0 0 2px;
+  font-size: 0.94rem;
+}
+
+.forecast-news-list button {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 10px;
+  border: 1px solid #edf1f0;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #18201f;
+  padding: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.forecast-news-list button span {
+  font-size: 0.86rem;
+  font-weight: 900;
+}
+
+.forecast-news-list button small {
+  grid-column: 1 / -1;
+}
+
+.forecast-news-list p {
+  margin: 0;
+  color: #66716e;
+  font-size: 0.84rem;
+}
+
 .factor-list {
   display: grid;
   gap: 8px;
@@ -808,10 +1038,14 @@ button {
   grid-template-columns: 1fr 44px 54px;
   align-items: center;
   gap: 8px;
+  border: 0;
   border-radius: 8px;
   background: #f6f9f8;
+  color: #18201f;
   min-height: 38px;
   padding: 0 10px;
+  text-align: left;
+  cursor: pointer;
 }
 
 .factor-row span {
@@ -1492,13 +1726,21 @@ button {
 }
 
 .evidence-list strong,
+.evidence-list h3,
 .evidence-list span,
 .evidence-list a {
   display: block;
 }
 
+.evidence-list h3 {
+  margin: 7px 0 0;
+  color: #18201f;
+  font-size: 0.98rem;
+  line-height: 1.32;
+}
+
 .evidence-list p {
-  margin: 7px 0;
+  margin: 8px 0;
   color: #41504d;
   line-height: 1.45;
   font-size: 0.9rem;
@@ -1522,6 +1764,8 @@ button {
   .signal-ops-grid,
   .metric-grid,
   .ops-grid,
+  .direction-hero,
+  .direction-columns,
   .forecast-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1535,6 +1779,8 @@ button {
   .hero-grid,
   .content-grid,
   .ops-grid,
+  .direction-hero,
+  .direction-columns,
   .forecast-grid {
     grid-template-columns: 1fr;
   }
@@ -1575,6 +1821,8 @@ button {
   .flow-grid,
   .export-list,
   .forecast-probs,
+  .forecast-scenario-grid,
+  .tep-scenario-grid,
   .quote-summary-row,
   .quote-controls {
     grid-template-columns: 1fr;
