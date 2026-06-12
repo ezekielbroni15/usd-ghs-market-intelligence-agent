@@ -139,6 +139,8 @@ Content-Type: application/json
 
 USD/GHS quote priority is now: `INTERBANK_API_URL`, `CEDIRATES_API_KEY`, BoG Daily Interbank FX Rates, CediRates public USD/GHS bank average, manual quote import, then a clearly marked seeded fallback. The CediRates public fallback uses bank buying/selling/mid rows from `https://cedirates.com/exchange-rates/usd-to-ghs/`; BoG uses `https://www.bog.gov.gh/treasury-and-the-markets/daily-interbank-fx-rates/`.
 
+Previous close priority is: prior-day archived snapshot, latest archived live snapshot, manual previous close from `POST /api/previous-close`, `PREVIOUS_CLOSE_RATE`, source-provided previous close, then current rate as a last resort. On a fresh Render deploy with no persistent archive yet, set `PREVIOUS_CLOSE_RATE`, `PREVIOUS_CLOSE_DATE`, and `PREVIOUS_CLOSE_SOURCE` in Render environment variables so the daily move does not reset to 0%.
+
 Reuters and Bloomberg should be connected through licensed APIs, terminal exports, approved email ingestion, or permitted RSS/feed products. The app intentionally avoids scraping paywalled Reuters or Bloomberg pages.
 
 Copy `.env.example` to `.env` and fill in the feed credentials or URLs you have. Without those credentials, the agent uses public-source scans and clearly marks missing production feeds as unconfigured or fallback.

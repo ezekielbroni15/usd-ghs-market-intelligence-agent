@@ -695,6 +695,63 @@ button {
   font-size: 0.9rem;
 }
 
+.bog-analysis-card {
+  border: 1px solid rgba(29, 58, 54, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 20px 55px rgba(31, 55, 53, 0.09);
+  padding: 18px;
+  margin: 0 0 18px;
+}
+
+.bog-card-top,
+.bog-rate-row {
+  display: flex;
+  align-items: center;
+}
+
+.bog-card-top {
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.bog-card-top span,
+.bog-rate-row span {
+  color: #66716e;
+  font-size: 0.78rem;
+}
+
+.bog-card-top h2 {
+  margin: 4px 0 0;
+  font-size: 1.15rem;
+}
+
+.bog-rate-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.bog-rate-row div {
+  border-radius: 8px;
+  background: #f6f9f8;
+  padding: 12px;
+}
+
+.bog-rate-row strong {
+  display: block;
+  margin-top: 5px;
+  font-size: 1.12rem;
+}
+
+.bog-analysis-card p {
+  margin: 12px 0 0;
+  color: #5d6b68;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
 .metric-icon {
   width: 38px;
   height: 38px;
@@ -1823,6 +1880,7 @@ button {
   .forecast-probs,
   .forecast-scenario-grid,
   .tep-scenario-grid,
+  .bog-rate-row,
   .quote-summary-row,
   .quote-controls {
     grid-template-columns: 1fr;

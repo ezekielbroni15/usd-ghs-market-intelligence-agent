@@ -59,6 +59,23 @@ const marketState = {
   quoteProviderRows: null,
   quoteContributors: [],
   quoteRemittanceRows: [],
+  bogAnalysis: {
+    available: false,
+    rate: null,
+    buying: null,
+    selling: null,
+    midRate: null,
+    previousRate: null,
+    previousBuying: null,
+    previousSelling: null,
+    previousMidRate: null,
+    previousDate: null,
+    move: null,
+    status: 'Unavailable',
+    source: 'Bank of Ghana Daily Interbank FX Rates',
+    url: 'https://www.bog.gov.gh/treasury-and-the-markets/daily-interbank-fx-rates/',
+    interpretation: 'BoG daily interbank reference was not available in this refresh.'
+  },
   moveBasis: 'Fallback sample'
 };
 
@@ -384,6 +401,81 @@ function MetricCard({ label, value, meta, trend }) {
         <TrendIcon size={18} />
       </div>
       <p>{meta}</p>
+    </article>
+  );
+}
+
+function BogAnalysisCard({ analysis, onInspect }) {
+  const hasRate = analysis?.available && Number.isFinite(Number(analysis.rate));
+  const move = Number(analysis?.move);
+  const trend = Number.isFinite(move) ? (move <= 0 ? 'down' : 'up') : 'flat';
+  const TrendIcon = trend === 'up' ? ArrowUpRight : trend === 'down' ? ArrowDownRight : Activity;
+  const evidence = [
+    {
+      source: analysis?.source || 'Bank of Ghana',
+      title: analysis?.status || 'BoG reference',
+      snippet: analysis?.interpretation || analysis?.reason || 'Separate BoG official reference.',
+      url: analysis?.url,
+      status: analysis?.includedInMarketAverage ? 'Included in blended average' : 'Reference only',
+      impact: analysis?.reason
+    },
+    analysis?.officialReference
+      ? {
+          source: 'Bank of Ghana official page',
+          title: analysis.officialReference.status || 'BoG official reference',
+          snippet: analysis.officialReference.reason,
+          url: analysis.officialReference.url,
+          status: 'Official reference',
+          impact: 'Shown separately when not blended into provider average'
+        }
+      : null
+  ].filter(Boolean);
+
+  return (
+    <article className="bog-analysis-card">
+      <div className="bog-card-top">
+        <div>
+          <span>Official reference</span>
+          <h2>BoG USD/GHS</h2>
+        </div>
+        <div className={`metric-icon ${trend}`}>
+          <TrendIcon size={18} />
+        </div>
+      </div>
+      <div className="bog-rate-row">
+        <div>
+          <span>Buying</span>
+          <strong>{formatRate(analysis?.buying)}</strong>
+        </div>
+        <div>
+          <span>Selling</span>
+          <strong>{formatRate(analysis?.selling)}</strong>
+        </div>
+        <div>
+          <span>Mid-rate</span>
+          <strong>{hasRate ? Number(analysis.midRate || analysis.rate).toFixed(4) : 'N/A'}</strong>
+        </div>
+        <div>
+          <span>Prev buying</span>
+          <strong>{formatRate(analysis?.previousBuying)}</strong>
+        </div>
+        <div>
+          <span>Prev selling</span>
+          <strong>{formatRate(analysis?.previousSelling)}</strong>
+        </div>
+        <div>
+          <span>Prev mid {analysis?.previousDate ? `(${analysis.previousDate})` : ''}</span>
+          <strong>{formatRate(analysis?.previousMidRate || analysis?.previousRate)}</strong>
+        </div>
+        <div>
+          <span>Mid move</span>
+          <strong>{Number.isFinite(move) ? `${move}%` : 'N/A'}</strong>
+        </div>
+      </div>
+      <p>{analysis?.interpretation}</p>
+      <button className="source-button" type="button" onClick={() => onInspect('BoG USD/GHS Analysis', evidence)}>
+        View BoG source
+      </button>
     </article>
   );
 }
@@ -1379,6 +1471,8 @@ function App() {
         <MetricCard label="Supply score" value="74 / 100" meta="BoG, gold, and normal demand support" trend="up" />
         <MetricCard label="Risk score" value="38 / 100" meta="Fed and fiscal headlines are watch items" trend="flat" />
       </section>
+
+      <BogAnalysisCard analysis={currentMarket.bogAnalysis} onInspect={inspectSources} />
 
       <QuoteTable market={currentMarket} onFilteredRateChange={setFilteredQuote} />
 

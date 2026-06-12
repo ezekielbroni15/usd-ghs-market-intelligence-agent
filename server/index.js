@@ -8,7 +8,9 @@ const {
   appendForecastActual,
   readLatestArchive,
   readArchiveHistory,
-  appendManualQuote
+  appendManualQuote,
+  writePreviousClose,
+  readPreviousClose
 } = require('./storage');
 const { deliverNote, noteToText } = require('./delivery');
 
@@ -49,6 +51,7 @@ function configStatus() {
   return {
     interbankApi: Boolean(config.interbankApiUrl),
     cediRatesApi: Boolean(config.cediRatesApiKey),
+    previousCloseEnv: Boolean(config.previousCloseRate),
     goldApi: Boolean(config.goldApiUrl),
     cocoaApi: Boolean(config.cocoaApiUrl),
     aiProvider: config.aiProvider,
@@ -194,6 +197,42 @@ app.post('/api/interbank-quote', async (request, response) => {
       rate,
       source: request.body?.source || 'Manual desk quote',
       timestamp: request.body?.timestamp || new Date().toISOString()
+    });
+    response.json(await getIntelligence({ force: true, archive: true }));
+  } catch (error) {
+    response.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.get('/api/previous-close', async (_request, response) => {
+  try {
+    response.json({
+      manual: await readPreviousClose(),
+      env: config.previousCloseRate
+        ? {
+            rate: config.previousCloseRate,
+            date: config.previousCloseDate,
+            source: config.previousCloseSource
+          }
+        : null
+    });
+  } catch (error) {
+    response.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.post('/api/previous-close', async (request, response) => {
+  const rate = Number(request.body?.rate);
+  if (!rate || rate <= 0) {
+    response.status(400).json({ ok: false, error: 'A positive numeric previous close rate is required.' });
+    return;
+  }
+
+  try {
+    await writePreviousClose({
+      rate,
+      date: request.body?.date || new Date().toISOString().slice(0, 10),
+      source: request.body?.source || 'Manual previous close'
     });
     response.json(await getIntelligence({ force: true, archive: true }));
   } catch (error) {

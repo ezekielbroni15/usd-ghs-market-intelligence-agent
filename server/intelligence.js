@@ -2,7 +2,7 @@ const fs = require('fs/promises');
 const https = require('https');
 const path = require('path');
 const { config } = require('./config');
-const { readArchiveHistory, readForecastActuals, readLatestManualQuote } = require('./storage');
+const { readArchiveHistory, readForecastActuals, readLatestManualQuote, readPreviousClose } = require('./storage');
 
 const SOURCE_TIMEOUT_MS = 9000;
 const BOG_DAILY_INTERBANK_URL = 'https://www.bog.gov.gh/treasury-and-the-markets/daily-interbank-fx-rates/';
@@ -540,9 +540,19 @@ function average(numbers) {
   return Number((valid.reduce((total, value) => total + value, 0) / valid.length).toFixed(4));
 }
 
+function utcDateDaysAgo(days) {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() - days);
+  return date.toISOString().slice(0, 10);
+}
+
 function latestTimestamp(value) {
   const time = new Date(value || 0).getTime();
   return Number.isFinite(time) ? time : 0;
+}
+
+function findContributor(contributors = [], matcher) {
+  return contributors.find((row) => matcher(`${row.name || ''} ${row.type || ''} ${row.source || ''}`.toLowerCase()));
 }
 
 function latestProviderRows(rows) {
@@ -661,13 +671,37 @@ async function fetchCediRatesApiQuote() {
     if (!text) continue;
     try {
       const quote = summarizeCediRatesRows(jsonRowsFromAny(JSON.parse(text)), 'CediRates API');
-      if (quote) return quote;
+      if (quote) {
+        const previousQuote = await fetchCediRatesPublicQuoteForDate(utcDateDaysAgo(1));
+        return {
+          ...quote,
+          previousClose: previousQuote?.rate || quote.previousClose,
+          previousQuote,
+          previousQuoteDate: utcDateDaysAgo(1)
+        };
+      }
     } catch {
       continue;
     }
   }
 
   return null;
+}
+
+async function fetchCediRatesPublicQuoteForDate(date) {
+  const separator = CEDIRATES_PUBLIC_RATES_URL.includes('?') ? '&' : '?';
+  const jsonText = await fetchTextUrl(`${CEDIRATES_PUBLIC_RATES_URL}${separator}date=${date}`, {
+    accept: 'application/json',
+    contentType: 'application/json'
+  });
+  if (!jsonText) return null;
+
+  try {
+    const quote = summarizeCediRatesRows(jsonRowsFromAny(JSON.parse(jsonText)), `CediRates ${date}`);
+    return quote ? { ...quote, date } : null;
+  } catch {
+    return null;
+  }
 }
 
 async function fetchCediRatesPublicQuote() {
@@ -678,7 +712,15 @@ async function fetchCediRatesPublicQuote() {
   if (jsonText) {
     try {
       const quote = summarizeCediRatesRows(jsonRowsFromAny(JSON.parse(jsonText)), 'CediRates bank average');
-      if (quote) return quote;
+      if (quote) {
+        const previousQuote = await fetchCediRatesPublicQuoteForDate(utcDateDaysAgo(1));
+        return {
+          ...quote,
+          previousClose: previousQuote?.rate || quote.previousClose,
+          previousQuote,
+          previousQuoteDate: utcDateDaysAgo(1)
+        };
+      }
     } catch {
       // Continue to page text fallback.
     }
@@ -1129,7 +1171,23 @@ function buildSignals({ sources, quote }) {
   return signals;
 }
 
-function resolvePreviousClose(quote, history) {
+function resolvePreviousClose(quote, history, manualPreviousClose = null) {
+  const today = new Date().toISOString().slice(0, 10);
+  const previousDaySnapshot = [...history]
+    .reverse()
+    .find((snapshot) => {
+      const previousRate = plausibleUsdGhsRate(snapshot.marketState?.interbankRate);
+      const snapshotDate = String(snapshot.generatedAt || '').slice(0, 10);
+      return previousRate && snapshot.marketState?.quoteStatus !== 'Fallback' && snapshotDate && snapshotDate < today;
+    });
+
+  if (previousDaySnapshot?.marketState?.interbankRate) {
+    return {
+      previousClose: previousDaySnapshot.marketState.interbankRate,
+      moveBasis: `Previous archived close from ${previousDaySnapshot.generatedAt?.slice(0, 10) || 'history'}`
+    };
+  }
+
   const previousSnapshot = [...history]
     .reverse()
     .find((snapshot) => {
@@ -1140,7 +1198,21 @@ function resolvePreviousClose(quote, history) {
   if (previousSnapshot?.marketState?.interbankRate) {
     return {
       previousClose: previousSnapshot.marketState.interbankRate,
-      moveBasis: `Last archived ${previousSnapshot.marketState.quoteSource || 'market'} rate`
+      moveBasis: `Latest archived ${previousSnapshot.marketState.quoteSource || 'market'} rate`
+    };
+  }
+
+  if (plausibleUsdGhsRate(manualPreviousClose?.rate)) {
+    return {
+      previousClose: manualPreviousClose.rate,
+      moveBasis: `${manualPreviousClose.source || 'Manual previous close'}${manualPreviousClose.date ? ` (${manualPreviousClose.date})` : ''}`
+    };
+  }
+
+  if (plausibleUsdGhsRate(config.previousCloseRate)) {
+    return {
+      previousClose: config.previousCloseRate,
+      moveBasis: `${config.previousCloseSource}${config.previousCloseDate ? ` (${config.previousCloseDate})` : ''}`
     };
   }
 
@@ -1150,8 +1222,76 @@ function resolvePreviousClose(quote, history) {
   };
 }
 
-function buildMarketState(quote, signals, history = []) {
-  const { previousClose, moveBasis } = resolvePreviousClose(quote, history);
+function resolvePreviousBogRate(history) {
+  const previousSnapshot = [...history]
+    .reverse()
+    .find((snapshot) => plausibleUsdGhsRate(snapshot.marketState?.bogAnalysis?.rate));
+  return previousSnapshot?.marketState?.bogAnalysis?.rate || null;
+}
+
+function buildBogAnalysis(quote, history = []) {
+  const cediRatesBog = findContributor(
+    quote.contributors || [],
+    (text) => text.includes('bank of ghana') && text.includes('cedirates')
+  );
+  const previousCediRatesBog = findContributor(
+    quote.previousQuote?.contributors || [],
+    (text) => text.includes('bank of ghana') && text.includes('cedirates')
+  );
+  const blendedBog = (quote.contributors || []).find((row) => row.source === 'Bank of Ghana');
+  const referenceRate = plausibleUsdGhsRate(quote.bogReference?.rate);
+  const blendedRate = plausibleUsdGhsRate(blendedBog?.midRate);
+  const providerMid = plausibleUsdGhsRate(cediRatesBog?.midRate);
+  const rate = providerMid || referenceRate || blendedRate || null;
+  const previousRate = plausibleUsdGhsRate(previousCediRatesBog?.midRate) || resolvePreviousBogRate(history);
+  const move = rate && previousRate ? Number((((rate - previousRate) / previousRate) * 100).toFixed(2)) : null;
+
+  if (!rate) {
+    return {
+      available: false,
+      rate: null,
+      buying: null,
+      selling: null,
+      previousRate: null,
+      previousBuying: null,
+      previousSelling: null,
+      move: null,
+      status: 'Unavailable',
+      source: 'Bank of Ghana Daily Interbank FX Rates',
+      url: BOG_DAILY_INTERBANK_URL,
+      interpretation: 'BoG daily interbank reference was not available in this refresh.'
+    };
+  }
+
+  const isReferenceOnly = Boolean(quote.bogReference);
+  return {
+    available: true,
+    rate,
+    buying: plausibleUsdGhsRate(cediRatesBog?.buying) || null,
+    selling: plausibleUsdGhsRate(cediRatesBog?.selling) || null,
+    midRate: rate,
+    previousRate,
+    previousBuying: plausibleUsdGhsRate(previousCediRatesBog?.buying) || null,
+    previousSelling: plausibleUsdGhsRate(previousCediRatesBog?.selling) || null,
+    previousMidRate: previousRate,
+    previousDate: quote.previousQuoteDate || null,
+    move,
+    status: cediRatesBog ? 'CediRates Bank of Ghana provider row' : quote.bogReference?.status || 'Blended Live Sources',
+    source: cediRatesBog ? 'CediRates - Bank of Ghana' : quote.bogReference?.source || 'Bank of Ghana Daily Interbank FX Rates',
+    url: cediRatesBog?.sourceUrl || quote.bogReference?.url || BOG_DAILY_INTERBANK_URL,
+    reason: quote.bogReference?.reason || 'BoG structured table value passed validation and was blended.',
+    officialReference: quote.bogReference || null,
+    includedInMarketAverage: Boolean(cediRatesBog) || !isReferenceOnly,
+    interpretation: cediRatesBog
+      ? 'BoG analysis uses the CediRates Bank of Ghana provider row for buying, selling, and mid-rate, with yesterday pulled from CediRates date history when available.'
+      : isReferenceOnly
+        ? 'BoG rate is shown as a separate official reference because it was not blended into the CediRates provider average.'
+        : 'BoG rate passed validation and is included in the blended market average.'
+  };
+}
+
+function buildMarketState(quote, signals, history = [], manualPreviousClose = null) {
+  const { previousClose, moveBasis } = resolvePreviousClose(quote, history, manualPreviousClose);
   const dailyMove = Number((((quote.rate - previousClose) / previousClose) * 100).toFixed(2));
   const net = signals.reduce((total, signal) => total + Number(signal.value || 0), 0);
   const confidence = Math.min(88, Math.max(45, 58 + Math.round(Math.abs(net) / 2)));
@@ -1179,6 +1319,7 @@ function buildMarketState(quote, signals, history = []) {
     quoteProviderLastUpdated: quote.providerLastUpdated || null,
     quoteContributors: quote.contributors || [],
     bogReference: quote.bogReference || null,
+    bogAnalysis: buildBogAnalysis(quote, history),
     lastUpdated:
       new Date().toLocaleTimeString('en-GB', {
         hour: '2-digit',
@@ -2077,7 +2218,8 @@ async function buildIntelligence() {
   const allSources = [...official, ...commodities, ...licensedNews];
   const signals = buildSignals({ sources: allSources, quote });
   const history = await readArchiveHistory(120);
-  const marketState = buildMarketState(quote, signals, history);
+  const manualPreviousClose = await readPreviousClose();
+  const marketState = buildMarketState(quote, signals, history, manualPreviousClose);
   const probability = buildProbabilities(signals);
   const forecast = buildForecast({ marketState, signals, sources: allSources });
   const directionEngine = buildDirectionEngine({ marketState, sources: allSources });

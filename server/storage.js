@@ -5,6 +5,7 @@ const dataDir = path.join(__dirname, '..', 'data');
 const archivePath = path.join(dataDir, 'snapshots.jsonl');
 const manualQuotePath = path.join(dataDir, 'interbank-quotes.csv');
 const actualResultPath = path.join(dataDir, 'forecast-actuals.csv');
+const previousClosePath = path.join(dataDir, 'previous-close.json');
 
 async function ensureDataDir() {
   await fs.mkdir(dataDir, { recursive: true });
@@ -88,6 +89,29 @@ async function appendForecastActual({ date, direction, rate, source = 'Manual ac
   await fs.appendFile(actualResultPath, `${date},${direction},${rate || ''},${source.replace(/,/g, ' ')}\n`, 'utf8');
 }
 
+async function writePreviousClose({ rate, date = new Date().toISOString().slice(0, 10), source = 'Manual previous close' }) {
+  await ensureDataDir();
+  await fs.writeFile(
+    previousClosePath,
+    `${JSON.stringify({ rate: Number(rate), date, source, updatedAt: new Date().toISOString() }, null, 2)}\n`,
+    'utf8'
+  );
+}
+
+async function readPreviousClose() {
+  try {
+    const content = await fs.readFile(previousClosePath, 'utf8');
+    const record = JSON.parse(content);
+    return {
+      ...record,
+      rate: Number(record.rate)
+    };
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
 async function readForecastActuals() {
   try {
     const content = await fs.readFile(actualResultPath, 'utf8');
@@ -112,6 +136,8 @@ module.exports = {
   readArchiveHistory,
   appendManualQuote,
   readLatestManualQuote,
+  writePreviousClose,
+  readPreviousClose,
   appendForecastActual,
   readForecastActuals
 };
