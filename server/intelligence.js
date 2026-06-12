@@ -546,6 +546,22 @@ function utcDateDaysAgo(days) {
   return date.toISOString().slice(0, 10);
 }
 
+function isoDateRange(start, end, maxDays = 31) {
+  const startDate = new Date(`${start}T00:00:00.000Z`);
+  const endDate = new Date(`${end}T00:00:00.000Z`);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime()) || startDate > endDate) {
+    return [];
+  }
+
+  const dates = [];
+  const cursor = new Date(startDate);
+  while (cursor <= endDate && dates.length < maxDays) {
+    dates.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return dates;
+}
+
 function latestTimestamp(value) {
   const time = new Date(value || 0).getTime();
   return Number.isFinite(time) ? time : 0;
@@ -607,6 +623,7 @@ function summarizeCediRatesRows(rows, source) {
         buying,
         selling,
         midRate: suppliedMid || computedMid || (/remittance/i.test(type) ? buying : null),
+        rateDate: row.date ? String(row.date).slice(0, 10) : null,
         lastUpdatedAt: row.lastUpdatedAt || row.updatedAt || row.date || null,
         source: 'CediRates',
         sourceUrl: CEDIRATES_USD_GHS_URL
@@ -702,6 +719,34 @@ async function fetchCediRatesPublicQuoteForDate(date) {
   } catch {
     return null;
   }
+}
+
+async function fetchCediRatesProviderRowsForDateRange(start, end) {
+  const dates = isoDateRange(start, end, 31);
+  if (!dates.length) {
+    return {
+      start,
+      end,
+      rows: [],
+      error: 'Invalid date range'
+    };
+  }
+
+  const quotes = await Promise.all(dates.map((date) => fetchCediRatesPublicQuoteForDate(date)));
+  const rows = quotes.flatMap((quote) =>
+    (quote?.contributors || []).map((row) => ({
+      ...row,
+      rateDate: row.rateDate || quote.date
+    }))
+  );
+
+  return {
+    start: dates[0],
+    end: dates[dates.length - 1],
+    daysRequested: dates.length,
+    rows,
+    source: 'CediRates dated rates endpoint'
+  };
 }
 
 async function fetchCediRatesPublicQuote() {
@@ -2261,5 +2306,6 @@ async function buildIntelligence() {
 }
 
 module.exports = {
-  buildIntelligence
+  buildIntelligence,
+  fetchCediRatesProviderRowsForDateRange
 };

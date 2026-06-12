@@ -84,6 +84,7 @@ const API_BASE_URL =
   (typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:8787');
 const API_URL = `${API_BASE_URL}/api/market-intelligence`;
 const REFRESH_URL = `${API_BASE_URL}/api/refresh`;
+const RATE_HISTORY_URL = `${API_BASE_URL}/api/rates/history`;
 
 const signalIcons = {
   'Bank of Ghana': Landmark,
@@ -530,25 +531,93 @@ function MultiSelectGroup({ label, options, selected, onChange }) {
   );
 }
 
+function ExcludeProviderSelect({ options, selected, onChange }) {
+  const selectedSet = new Set(selected);
+
+  function toggle(option) {
+    const next = selectedSet.has(option)
+      ? selected.filter((item) => item !== option)
+      : [...selected, option];
+    onChange(next);
+  }
+
+  return (
+    <div className="exclude-select">
+      <span>Exclude provider</span>
+      <details>
+        <summary>
+          <strong>{selected.length ? `${selected.length} excluded` : 'None'}</strong>
+          <ChevronRight size={15} />
+        </summary>
+        <div className="exclude-menu">
+          <div className="exclude-menu-head">
+            <span>{options.length} providers in current filter</span>
+            {selected.length > 0 && (
+              <button type="button" onClick={() => onChange([])}>
+                Clear
+              </button>
+            )}
+          </div>
+          <div className="exclude-options">
+            {options.map((option) => (
+              <label key={option}>
+                <input
+                  type="checkbox"
+                  checked={selectedSet.has(option)}
+                  onChange={() => toggle(option)}
+                />
+                <span>{option}</span>
+              </label>
+            ))}
+            {!options.length && <p>No providers match the current type/source filters.</p>}
+          </div>
+        </div>
+      </details>
+      {selected.length > 0 && (
+        <div className="exclude-chips">
+          {selected.slice(0, 4).map((name) => (
+            <button type="button" key={name} onClick={() => toggle(name)}>
+              {name}
+              <X size={12} />
+            </button>
+          ))}
+          {selected.length > 4 && <em>+{selected.length - 4} more</em>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function QuoteTable({ market, onFilteredRateChange }) {
   const [mode, setMode] = useState('market');
   const [typeFilter, setTypeFilter] = useState(['All']);
   const [sourceFilter, setSourceFilter] = useState(['All']);
   const [searchTerm, setSearchTerm] = useState('');
+  const [excludedProviders, setExcludedProviders] = useState([]);
+  const [dateStart, setDateStart] = useState('');
+  const [dateEnd, setDateEnd] = useState('');
+  const [historyRows, setHistoryRows] = useState([]);
+  const [historyStatus, setHistoryStatus] = useState('');
   const [page, setPage] = useState(1);
+  const dateRangeActive = Boolean(dateStart && dateEnd);
+  const baseRows = dateRangeActive ? historyRows : market.quoteContributors || [];
   const rows = mode === 'remittance'
-    ? (market.quoteContributors || []).filter((row) => /remittance|money transfer/i.test(`${row.type} ${row.slug}`))
-    : market.quoteContributors || [];
+    ? baseRows.filter((row) => /remittance|money transfer/i.test(`${row.type} ${row.slug}`))
+    : baseRows;
   const providerTypes = ['All', ...Array.from(new Set(rows.map((row) => row.type).filter(Boolean))).sort()];
   const sources = ['All', ...Array.from(new Set(rows.map((row) => row.source).filter(Boolean))).sort()];
-  const filteredRows = rows.filter((row) => {
+  const preExcludeRows = rows.filter((row) => {
+    const rowText = `${row.name || ''} ${row.type || ''} ${row.source || ''}`.toLowerCase();
     const typeOk = typeFilter.includes('All') || typeFilter.includes(row.type);
     const sourceOk = sourceFilter.includes('All') || sourceFilter.includes(row.source);
     const searchOk =
       !searchTerm.trim() ||
-      `${row.name || ''} ${row.type || ''} ${row.source || ''}`.toLowerCase().includes(searchTerm.trim().toLowerCase());
+      rowText.includes(searchTerm.trim().toLowerCase());
     return typeOk && sourceOk && searchOk;
   });
+  const providerNames = Array.from(new Set(preExcludeRows.map((row) => row.name).filter(Boolean))).sort();
+  const activeExcludedProviders = excludedProviders.filter((name) => providerNames.includes(name));
+  const filteredRows = preExcludeRows.filter((row) => !activeExcludedProviders.includes(row.name));
   const pageSize = 10;
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
   const currentPage = Math.min(page, totalPages);
@@ -565,15 +634,60 @@ function QuoteTable({ market, onFilteredRateChange }) {
       selling: calcSelling,
       rowCount: filteredRows.length,
       types: typeFilter,
-      sources: sourceFilter
+      sources: sourceFilter,
+      excluded: activeExcludedProviders,
+      dateRange: dateRangeActive ? `${dateStart} - ${dateEnd}` : null
     });
-  }, [mode, calcMid, calcBuying, calcSelling, filteredRows.length, typeFilter.join('|'), sourceFilter.join('|'), searchTerm]);
+  }, [mode, calcMid, calcBuying, calcSelling, filteredRows.length, typeFilter.join('|'), sourceFilter.join('|'), searchTerm, activeExcludedProviders.join('|'), dateRangeActive, dateStart, dateEnd]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadHistoryRows() {
+      if (!dateStart || !dateEnd) {
+        setHistoryRows([]);
+        setHistoryStatus('');
+        return;
+      }
+
+      if (dateStart > dateEnd) {
+        setHistoryRows([]);
+        setHistoryStatus('Start date must be before end date.');
+        return;
+      }
+
+      setHistoryStatus('Loading CediRates date range...');
+      try {
+        const response = await fetch(`${RATE_HISTORY_URL}?start=${dateStart}&end=${dateEnd}`);
+        if (!response.ok) throw new Error(`API returned ${response.status}`);
+        const payload = await response.json();
+        if (cancelled) return;
+        setHistoryRows(payload.rows || []);
+        setHistoryStatus(`${payload.rows?.length || 0} rows from ${payload.start} to ${payload.end}`);
+        setPage(1);
+      } catch (error) {
+        if (cancelled) return;
+        setHistoryRows([]);
+        setHistoryStatus(`Date range failed: ${error.message}`);
+      }
+    }
+
+    loadHistoryRows();
+    return () => {
+      cancelled = true;
+    };
+  }, [dateStart, dateEnd]);
 
   function updateMode(nextMode) {
     setMode(nextMode);
     setTypeFilter(['All']);
     setSourceFilter(['All']);
     setSearchTerm('');
+    setExcludedProviders([]);
+    setDateStart('');
+    setDateEnd('');
+    setHistoryRows([]);
+    setHistoryStatus('');
     setPage(1);
   }
 
@@ -584,15 +698,19 @@ function QuoteTable({ market, onFilteredRateChange }) {
   }
 
   function exportFilteredRows() {
-    const headers = ['Name', 'Type', 'Source', 'Buying', 'Selling', 'MidRate', 'Last Updated', 'Source URL'];
+    const headers = ['Date', 'Name', 'Type', 'Source', 'Buying', 'Selling', 'MidRate', 'Last Updated', 'Source URL'];
     const summaryRows = [
-      ['Filtered MidRate', '', '', '', '', formatRate(calcMid), '', ''],
-      ['Filtered Buying', '', '', formatRate(calcBuying), '', '', '', ''],
-      ['Filtered Selling', '', '', '', formatRate(calcSelling), '', '', ''],
-      ['Rows Used', filteredRows.length, '', '', '', '', '', ''],
+      ['Filtered MidRate', '', '', '', '', '', formatRate(calcMid), '', ''],
+      ['Filtered Buying', '', '', '', formatRate(calcBuying), '', '', '', ''],
+      ['Filtered Selling', '', '', '', '', formatRate(calcSelling), '', '', ''],
+      ['Rows Used', filteredRows.length, '', '', '', '', '', '', ''],
+      ['Search', searchTerm || 'None', '', '', '', '', '', '', ''],
+      ['Excluded', activeExcludedProviders.length ? activeExcludedProviders.join('; ') : 'None', '', '', '', '', '', '', ''],
+      ['Date Range', dateRangeActive ? `${dateStart} - ${dateEnd}` : 'Current latest rows', '', '', '', '', '', '', ''],
       []
     ];
     const dataRows = filteredRows.map((row) => [
+      row.rateDate || '',
       row.name,
       row.type,
       row.source,
@@ -653,6 +771,14 @@ function QuoteTable({ market, onFilteredRateChange }) {
             placeholder="Bank of Ghana"
           />
         </label>
+        <ExcludeProviderSelect
+          options={providerNames}
+          selected={activeExcludedProviders}
+          onChange={(next) => {
+            setExcludedProviders(next);
+            setPage(1);
+          }}
+        />
         <div className="quote-filter-count">
           <span>Rows</span>
           <strong>{filteredRows.length}</strong>
@@ -661,6 +787,70 @@ function QuoteTable({ market, onFilteredRateChange }) {
           Export CSV
         </button>
       </div>
+      <div className="date-filter-row">
+        <label>
+          Start date
+          <input
+            type="date"
+            value={dateStart}
+            onChange={(event) => {
+              setDateStart(event.target.value);
+              setPage(1);
+            }}
+          />
+        </label>
+        <label>
+          End date
+          <input
+            type="date"
+            value={dateEnd}
+            onChange={(event) => {
+              setDateEnd(event.target.value);
+              setPage(1);
+            }}
+          />
+        </label>
+        <div className="date-status">
+          <span>{historyStatus || 'Current latest provider rows'}</span>
+        </div>
+        {(dateStart || dateEnd) && (
+          <button
+            type="button"
+            onClick={() => {
+              setDateStart('');
+              setDateEnd('');
+              setHistoryRows([]);
+              setHistoryStatus('');
+              setPage(1);
+            }}
+          >
+            Clear dates
+          </button>
+        )}
+      </div>
+      {(searchTerm || activeExcludedProviders.length > 0 || dateStart || dateEnd || !typeFilter.includes('All') || !sourceFilter.includes('All')) && (
+        <div className="filter-reset-row">
+          <span>
+            Active filters{activeExcludedProviders.length ? `, excluding ${activeExcludedProviders.length} provider${activeExcludedProviders.length === 1 ? '' : 's'}` : ''}{dateRangeActive ? `, dates ${dateStart} to ${dateEnd}` : ''}
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              setTypeFilter(['All']);
+              setSourceFilter(['All']);
+              setSearchTerm('');
+              setExcludedProviders([]);
+              setDateStart('');
+              setDateEnd('');
+              setHistoryRows([]);
+              setHistoryStatus('');
+              setPage(1);
+            }}
+          >
+            Reset table filters
+          </button>
+        </div>
+      )}
       <div className="quote-summary-row">
         <div>
           <span>Filtered MidRate</span>
@@ -684,6 +874,7 @@ function QuoteTable({ market, onFilteredRateChange }) {
           <thead>
             <tr>
               <th>Name</th>
+              <th>Date</th>
               <th>Buying</th>
               <th>Selling</th>
               <th>MidRate</th>
@@ -696,6 +887,7 @@ function QuoteTable({ market, onFilteredRateChange }) {
                   <strong>{row.name}</strong>
                   <span>{row.type} · {row.source}</span>
                 </td>
+                <td>{row.rateDate || 'Latest'}</td>
                 <td>{formatRate(row.buying)}</td>
                 <td>{formatRate(row.selling)}</td>
                 <td>{formatRate(row.midRate)}</td>
@@ -703,7 +895,7 @@ function QuoteTable({ market, onFilteredRateChange }) {
             ))}
             {!visibleRows.length && (
               <tr>
-                <td colSpan="4">
+                <td colSpan="5">
                   {mode === 'remittance'
                     ? 'No remittance rows are available from the connected sources yet.'
                     : 'Provider rows will appear when CediRates, BoG, or another structured quote source responds.'}
